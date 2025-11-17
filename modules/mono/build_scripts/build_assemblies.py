@@ -288,6 +288,8 @@ def generate_sdk_package_versions():
             version_status = version_status[:pos] + "." + version_status[pos:]
         version_str += "-" + version_status
 
+    version_str += "-outpostia"
+
     import version
 
     version_defines = (
