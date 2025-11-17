@@ -1917,6 +1917,20 @@ void RendererCanvasCull::canvas_item_set_draw_index(RID p_item, int p_index) {
 	}
 }
 
+void RendererCanvasCull::canvas_item_set_y_sort_offset(RID p_item, real_t p_offset) {
+    Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+    ERR_FAIL_NULL(canvas_item);
+
+    canvas_item->y_sort_offset = p_offset;
+
+    if (canvas_item_owner.owns(canvas_item->parent)) {
+        Item *parent = canvas_item_owner.get_or_null(canvas_item->parent);
+        if (parent && parent->sort_y) {
+            _mark_ysort_dirty(parent);
+        }
+    }
+}
+
 void RendererCanvasCull::canvas_item_set_material(RID p_item, RID p_material) {
 	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
 	ERR_FAIL_NULL(canvas_item);
