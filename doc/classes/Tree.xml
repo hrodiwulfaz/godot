@@ -227,6 +227,12 @@
 				Returns the current scrolling position.
 			</description>
 		</method>
+		<method name="get_vscroll_bar" qualifiers="const">
+			<return type="VScrollBar" />
+			<description>
+				Returns the vertical [ScrollBar] used by this [Tree].
+			</description>
+		</method>
 		<method name="get_selected" qualifiers="const">
 			<return type="TreeItem" />
 			<description>
