@@ -43,6 +43,24 @@ namespace GodotPlugins
             }
         }
 
+        private static bool IsCodeCoverageEnabled()
+        {
+            // Check .NET profiler infrastructure (covers Microsoft/dotnet-coverage, JetBrains dotCover, OpenCover, etc.)
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CORECLR_ENABLE_PROFILING")) ||
+                !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTNET_ENABLE_PROFILING")))
+            {
+                return true;
+            }
+            
+            // Check JetBrains dotCover specific
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CODE_COVERAGE_SESSION_NAME")))
+            {
+                return true;
+            }
+            
+            return false;
+        }
+
         protected override Assembly? Load(AssemblyName assemblyName)
         {
             if (assemblyName.Name == null)
@@ -56,7 +74,14 @@ namespace GodotPlugins
             {
                 AssemblyLoadedPath = assemblyPath;
 
-                // Load in memory to prevent locking the file
+                // When code coverage is enabled, load from assembly path to allow profilers to instrument the code.
+                // This ensures Assembly.Location is populated, which is required by coverage tools.
+                if (IsCodeCoverageEnabled())
+                {
+                    return LoadFromAssemblyPath(assemblyPath);
+                }
+
+                // Load in memory to prevent locking the file (default behavior)
                 using var assemblyFile = File.Open(assemblyPath, FileMode.Open, FileAccess.Read, FileShare.Read);
                 string pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
 
