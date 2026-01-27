@@ -101,6 +101,12 @@
 				Returns a locale's language and its variant (e.g. [code]"en_US"[/code] would return [code]"English (United States)"[/code]).
 			</description>
 		</method>
+		<method name="get_fallback_locale" qualifiers="const">
+			<return type="String" />
+			<description>
+				Returns the fallback locale, which is used as a fallback when a translation for the current locale is not available.
+			</description>
+		</method>
 		<method name="get_or_add_domain">
 			<return type="TranslationDomain" />
 			<param index="0" name="domain" type="StringName" />
@@ -214,6 +220,13 @@
 			<description>
 				Sets the locale of the project. The [param locale] string will be standardized to match known locales (e.g. [code]en-US[/code] would be matched to [code]en_US[/code]).
 				If translations have been loaded beforehand for the new locale, they will be applied.
+			</description>
+		</method>
+		<method name="set_fallback_locale">
+			<return type="void" />
+			<param index="0" name="locale" type="String" />
+			<description>
+				Sets the fallback locale, which is used as a fallback when a translation for the current locale is not available.
 			</description>
 		</method>
 		<method name="standardize_locale" qualifiers="const">
