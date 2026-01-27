@@ -240,8 +240,9 @@ static Size2i window_size = Size2i(1152, 648);
 
 static int init_screen = DisplayServer::SCREEN_PRIMARY;
 static bool init_fullscreen = false;
-static bool init_maximized = false;
-static bool init_windowed = false;
+	static bool init_maximized = false;
+	static bool init_minimized = false;
+	static bool init_windowed = false;
 static bool init_always_on_top = false;
 static bool init_use_custom_pos = false;
 static bool init_use_custom_screen = false;
@@ -1295,6 +1296,9 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		} else if (arg == "-m" || arg == "--maximized") { // force maximized window
 			init_maximized = true;
 			window_mode = DisplayServer::WINDOW_MODE_MAXIMIZED;
+		} else if (arg == "--minimized") { // force minimized window
+			init_minimized = true;
+			window_mode = DisplayServer::WINDOW_MODE_MINIMIZED;
 		} else if (arg == "-w" || arg == "--windowed") { // force windowed window
 
 			init_windowed = true;
@@ -3510,6 +3514,8 @@ Error Main::setup2(bool p_show_boot_logo) {
 		if (!init_embed_parent_window_id) {
 			if (init_windowed) {
 				//do none..
+			} else if (init_minimized) {
+				DisplayServer::get_singleton()->window_set_mode(DisplayServer::WINDOW_MODE_MINIMIZED);
 			} else if (init_maximized) {
 				DisplayServer::get_singleton()->window_set_mode(DisplayServer::WINDOW_MODE_MAXIMIZED);
 			} else if (init_fullscreen) {
