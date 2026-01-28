@@ -55,6 +55,7 @@ public:
 		int ysort_children_count;
 		Color ysort_modulate;
 		Transform2D ysort_xform; // Relative to y-sorted subtree's root item (identity for such root). Its `origin.y` is used for sorting.
+		real_t y_sort_offset = 0.0;
 		int ysort_index;
 		int ysort_parent_abs_z_index; // Absolute Z index of parent. Only populated and used when y-sorting.
 		uint32_t visibility_layer = 0xffffffff;
@@ -114,8 +115,8 @@ public:
 
 	struct ItemYSort {
 		_FORCE_INLINE_ bool operator()(const Item *p_left, const Item *p_right) const {
-			const real_t left_y = p_left->ysort_xform.columns[2].y;
-			const real_t right_y = p_right->ysort_xform.columns[2].y;
+			const real_t left_y = p_left->ysort_xform.columns[2].y + p_left->y_sort_offset;
+			const real_t right_y = p_right->ysort_xform.columns[2].y + p_right->y_sort_offset;
 			if (Math::is_equal_approx(left_y, right_y)) {
 				return p_left->ysort_index < p_right->ysort_index;
 			}
@@ -284,6 +285,7 @@ public:
 
 	void canvas_item_clear(RID p_item);
 	void canvas_item_set_draw_index(RID p_item, int p_index);
+	void canvas_item_set_y_sort_offset(RID p_item, real_t p_offset);
 
 	void canvas_item_set_material(RID p_item, RID p_material);
 

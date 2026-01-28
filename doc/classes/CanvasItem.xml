@@ -701,6 +701,24 @@
 			With Y-sorting enabled on a parent node ('A') but disabled on a child node ('B'), the child node ('B') is sorted but its children ('C1', 'C2', etc.) render together on the same Y position as the child node ('B'). This allows you to organize the render order of a scene without changing the scene tree.
 			Nodes sort relative to each other only if they are on the same [member z_index].
 		</member>
+		<member name="y_sort_offset" type="float" setter="set_y_sort_offset" getter="get_y_sort_offset" default="0.0">
+			Offset added to the Y position when Y-sorting. Allows fine-tuning the sort order independently of the node's actual position.
+			[b]Note:[/b] This only affects sorting when the parent has [member y_sort_enabled] set to [code]true[/code]. The offset does not affect the actual position, collision, or rendering position of the node.
+			[codeblocks]
+			[gdscript]
+			# Sort as if 16 pixels lower (appears behind items at same Y)
+			sprite.y_sort_offset = 16.0
+			# Sort as if 8 pixels higher (appears in front of items at same Y)
+			sprite.y_sort_offset = -8.0
+			[/gdscript]
+			[csharp]
+			// Sort as if 16 pixels lower (appears behind items at same Y)
+			sprite.YSortOffset = 16.0f;
+			// Sort as if 8 pixels higher (appears in front of items at same Y)
+			sprite.YSortOffset = -8.0f;
+			[/csharp]
+			[/codeblocks]
+		</member>
 		<member name="z_as_relative" type="bool" setter="set_z_as_relative" getter="is_z_relative" default="true">
 			If [code]true[/code], this node's final Z index is relative to its parent's Z index.
 			For example, if [member z_index] is [code]2[/code] and its parent's final Z index is [code]3[/code], then this node's final Z index will be [code]5[/code] ([code]2 + 3[/code]).
