@@ -1087,6 +1087,9 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	String default_renderer_mobile = "";
 	String renderer_hints = "";
 
+	String exe_dir;
+	bool portable_mode;
+
 	packed_data = PackedData::get_singleton();
 	if (!packed_data) {
 		packed_data = memnew(PackedData);
@@ -2169,6 +2172,11 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #endif
 
 	OS::get_singleton()->set_cmdline(execpath, main_args, user_args);
+
+	// Check for portable mode indicator file
+	exe_dir = OS::get_singleton()->get_executable_path().get_base_dir();
+	portable_mode = FileAccess::exists(exe_dir.path_join("portable.txt"));
+	OS::get_singleton()->set_portable_mode(portable_mode);
 
 	Engine::get_singleton()->set_physics_ticks_per_second(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/physics_ticks_per_second", PROPERTY_HINT_RANGE, "1,1000,1"), 60));
 	Engine::get_singleton()->set_max_physics_steps_per_frame(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/max_physics_steps_per_frame", PROPERTY_HINT_RANGE, "1,100,1"), 8));

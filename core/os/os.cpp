@@ -335,6 +335,11 @@ String OS::get_user_data_dir(const String &p_user_dir) const {
 }
 
 String OS::get_user_data_dir() const {
+	// Portable mode: store everything directly in exe directory
+	if (_portable_mode) {
+		return get_executable_path().get_base_dir();
+	}
+
 	String appname = get_safe_dir_name(GLOBAL_GET("application/config/name"));
 	if (!appname.is_empty()) {
 		bool use_custom_dir = GLOBAL_GET("application/config/use_custom_user_dir");

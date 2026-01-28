@@ -48,6 +48,7 @@ class OS {
 	String _execpath;
 	List<String> _cmdline;
 	List<String> _user_args;
+	bool _portable_mode = false;
 	bool _keep_screen_on = true; // set default value to true, because this had been true before godot 2.0.
 	bool low_processor_usage_mode = false;
 	int low_processor_usage_mode_sleep_usec = 10000;
@@ -124,6 +125,9 @@ protected:
 	virtual void finalize_core() = 0;
 
 	virtual void set_cmdline(const char *p_execpath, const List<String> &p_args, const List<String> &p_user_args);
+
+	bool is_portable_mode() const { return _portable_mode; }
+	void set_portable_mode(bool p_portable) { _portable_mode = p_portable; }
 
 	virtual bool _check_internal_feature_support(const String &p_feature) = 0;
 
