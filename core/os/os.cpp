@@ -335,6 +335,11 @@ String OS::get_user_data_dir(const String &p_user_dir) const {
 }
 
 String OS::get_user_data_dir() const {
+	// User data dir override takes highest precedence
+	if (!_user_data_dir_override.is_empty()) {
+		return _user_data_dir_override;
+	}
+
 	// Portable mode: store everything directly in exe directory
 	if (_portable_mode) {
 		return get_executable_path().get_base_dir();

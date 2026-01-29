@@ -566,6 +566,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_option("-l, --language <locale>", "Use a specific locale (<locale> being a two-letter code).\n");
 #if defined(OVERRIDE_PATH_ENABLED)
 	print_help_option("--path <directory>", "Path to a project (<directory> must contain a \"project.godot\" file).\n", CLI_OPTION_AVAILABILITY_TEMPLATE_UNSAFE);
+	print_help_option("--user-data-dir <directory>", "Override user data directory path. Takes precedence over portable.txt mode. User data (logs, saves, cache, shaders) will be stored in this directory.\n", CLI_OPTION_AVAILABILITY_TEMPLATE_UNSAFE);
 	print_help_option("--scene <path>", "Path or UID of a scene in the project that should be started.\n", CLI_OPTION_AVAILABILITY_TEMPLATE_UNSAFE);
 	print_help_option("--main-pack <file>", "Path to a pack (.pck) file to load.\n", CLI_OPTION_AVAILABILITY_TEMPLATE_UNSAFE);
 #endif // defined(OVERRIDE_PATH_ENABLED)
@@ -1726,6 +1727,15 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 					"To be able to use it, use the `disable_path_overrides=no` SCons option when compiling Godot.\n");
 			goto error;
 #endif // defined(OVERRIDE_PATH_ENABLED)
+		} else if (arg == "--user-data-dir") { // Override user data directory path
+			if (N) {
+				String p = N->get();
+				OS::get_singleton()->set_user_data_dir_override(p);
+				N = N->next();
+			} else {
+				OS::get_singleton()->print("Missing user data directory path for --user-data-dir, aborting.\n");
+				goto error;
+			}
 		} else if (arg == "--quit") { // Auto quit at the end of the first main loop iteration
 			quit_after = 1;
 #ifdef TOOLS_ENABLED
@@ -2173,7 +2183,8 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 	OS::get_singleton()->set_cmdline(execpath, main_args, user_args);
 
-	// Check for portable mode indicator file
+	// Check for portable mode indicator file.
+	// Note: --user-data-dir CLI flag takes precedence over portable mode if set.
 	exe_dir = OS::get_singleton()->get_executable_path().get_base_dir();
 	portable_mode = FileAccess::exists(exe_dir.path_join("portable.txt"));
 	OS::get_singleton()->set_portable_mode(portable_mode);

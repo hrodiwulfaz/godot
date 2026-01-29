@@ -49,6 +49,7 @@ class OS {
 	List<String> _cmdline;
 	List<String> _user_args;
 	bool _portable_mode = false;
+	String _user_data_dir_override;
 	bool _keep_screen_on = true; // set default value to true, because this had been true before godot 2.0.
 	bool low_processor_usage_mode = false;
 	int low_processor_usage_mode_sleep_usec = 10000;
@@ -128,6 +129,9 @@ protected:
 
 	bool is_portable_mode() const { return _portable_mode; }
 	void set_portable_mode(bool p_portable) { _portable_mode = p_portable; }
+
+	String get_user_data_dir_override() const { return _user_data_dir_override; }
+	void set_user_data_dir_override(const String &p_path) { _user_data_dir_override = p_path; }
 
 	virtual bool _check_internal_feature_support(const String &p_feature) = 0;
 
