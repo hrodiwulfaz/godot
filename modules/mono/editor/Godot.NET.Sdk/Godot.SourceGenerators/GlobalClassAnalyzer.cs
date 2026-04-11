@@ -18,7 +18,16 @@ namespace Godot.SourceGenerators
         {
             context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
             context.EnableConcurrentExecution();
-            context.RegisterSyntaxNodeAction(AnalyzeNode, SyntaxKind.ClassDeclaration);
+            context.RegisterCompilationStartAction(startContext =>
+            {
+                if (startContext.Options.AnalyzerConfigOptionsProvider
+                    .IsGodotAnalyzerDisabled(nameof(GlobalClassAnalyzer)))
+                {
+                    return;
+                }
+
+                startContext.RegisterSyntaxNodeAction(AnalyzeNode, SyntaxKind.ClassDeclaration);
+            });
         }
 
         private static void AnalyzeNode(SyntaxNodeAnalysisContext context)

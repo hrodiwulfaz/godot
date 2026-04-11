@@ -6,15 +6,42 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Diagnostics;
 
 namespace Godot.SourceGenerators
 {
     internal static class ExtensionMethods
     {
+        private static bool ContainsSemicolonSeparatedValue(string? values, string value)
+        {
+            if (values is null)
+                return false;
+
+            string valuesText = values.Trim();
+
+            if (valuesText.Length == 0)
+                return false;
+
+            foreach (string entry in valuesText.Split(';'))
+            {
+                if (string.IsNullOrWhiteSpace(entry))
+                    continue;
+
+                if (entry.Trim().Equals(value, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
         public static bool TryGetGlobalAnalyzerProperty(
             this GeneratorExecutionContext context, string property, out string? value
         ) => context.AnalyzerConfigOptions.GlobalOptions
             .TryGetValue("build_property." + property, out value);
+
+        public static bool TryGetGlobalAnalyzerProperty(
+            this AnalyzerConfigOptionsProvider optionsProvider, string property, out string? value
+        ) => optionsProvider.GlobalOptions.TryGetValue("build_property." + property, out value);
 
         public static bool AreGodotSourceGeneratorsDisabled(this GeneratorExecutionContext context)
             => context.TryGetGlobalAnalyzerProperty("GodotSourceGenerators", out string? toggle) &&
@@ -26,11 +53,20 @@ namespace Godot.SourceGenerators
                toggle != null &&
                toggle.Equals("true", StringComparison.OrdinalIgnoreCase);
 
+        public static bool AreGodotAnalyzersDisabled(this AnalyzerConfigOptionsProvider optionsProvider)
+            => optionsProvider.TryGetGlobalAnalyzerProperty("GodotAnalyzers", out string? toggle) &&
+               toggle != null &&
+               toggle.Equals("disabled", StringComparison.OrdinalIgnoreCase);
+
+        public static bool IsGodotAnalyzerDisabled(this AnalyzerConfigOptionsProvider optionsProvider, string analyzerName)
+            => optionsProvider.AreGodotAnalyzersDisabled() ||
+               (optionsProvider.TryGetGlobalAnalyzerProperty("GodotDisabledAnalyzers", out string? disabledAnalyzers) &&
+                ContainsSemicolonSeparatedValue(disabledAnalyzers, analyzerName));
+
         public static bool IsGodotSourceGeneratorDisabled(this GeneratorExecutionContext context, string generatorName) =>
             AreGodotSourceGeneratorsDisabled(context) ||
             (context.TryGetGlobalAnalyzerProperty("GodotDisabledSourceGenerators", out string? disabledGenerators) &&
-            disabledGenerators != null &&
-            disabledGenerators.Split(';').Contains(generatorName));
+            ContainsSemicolonSeparatedValue(disabledGenerators, generatorName));
 
         public static bool InheritsFrom(this ITypeSymbol? symbol, string assemblyName, string typeFullName)
         {
