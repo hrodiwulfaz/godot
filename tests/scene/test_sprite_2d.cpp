@@ -33,6 +33,8 @@
 TEST_FORCE_LINK(test_sprite_2d)
 
 #include "scene/2d/sprite_2d.h"
+#include "scene/resources/material.h"
+#include "scene/resources/shader.h"
 
 namespace TestSprite2D {
 
@@ -259,6 +261,48 @@ TEST_CASE("[SceneTree][Sprite2D] Offset") {
 
 	sprite_2d->set_offset(Point2(-500.0, -250.0));
 	CHECK(sprite_2d->get_offset() == Point2(-500.0, -250.0));
+
+	memdelete(sprite_2d);
+}
+
+TEST_CASE("[SceneTree][Sprite2D] Instance shader parameters clear without stale storage") {
+	Ref<Shader> shader;
+	shader.instantiate();
+	shader->set_code("shader_type canvas_item;\ninstance uniform float mask_strength = 0.25;\nvoid fragment() { COLOR *= mask_strength; }");
+
+	Ref<ShaderMaterial> material;
+	material.instantiate();
+	material->set_shader(shader);
+
+	Sprite2D *sprite_2d = memnew(Sprite2D);
+	sprite_2d->set_material(material);
+
+	auto parameter_is_stored = [sprite_2d]() {
+		List<PropertyInfo> properties;
+		sprite_2d->get_property_list(&properties);
+		for (const PropertyInfo &property : properties) {
+			if (property.name == StringName("instance_shader_parameters/mask_strength")) {
+				return bool(property.usage & PROPERTY_USAGE_STORAGE);
+			}
+		}
+		return false;
+	};
+
+	for (int i = 0; i < 3; i++) {
+		sprite_2d->set_instance_shader_parameter("mask_strength", 0.5 + i);
+		CHECK(parameter_is_stored());
+		sprite_2d->set_instance_shader_parameter("mask_strength", Variant());
+		CHECK_FALSE(parameter_is_stored());
+	}
+
+	Ref<ShaderMaterial> replacement;
+	replacement.instantiate();
+	replacement->set_shader(shader);
+	sprite_2d->set_material(replacement);
+	sprite_2d->set_instance_shader_parameter("mask_strength", 0.75);
+	CHECK(parameter_is_stored());
+	sprite_2d->set_instance_shader_parameter("mask_strength", Variant());
+	CHECK_FALSE(parameter_is_stored());
 
 	memdelete(sprite_2d);
 }
