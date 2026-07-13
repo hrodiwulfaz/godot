@@ -297,4 +297,33 @@ TEST_CASE("[FileAccess] Cursor positioning") {
 	}
 }
 
+TEST_CASE("[DirAccess] Temporary directory prefixes and cleanup") {
+	const String prefixes[] = { "", "godot-dir-access-test" };
+	const bool keep_values[] = { false, true };
+
+	for (const String &prefix : prefixes) {
+		for (bool keep : keep_values) {
+			CAPTURE(prefix);
+			CAPTURE(keep);
+			String path;
+			{
+				Error error = FAILED;
+				Ref<DirAccess> temp_dir = DirAccess::create_temp(prefix, keep, &error);
+				REQUIRE(error == OK);
+				REQUIRE(temp_dir.is_valid());
+				path = temp_dir->get_current_dir();
+				CHECK(DirAccess::exists(path));
+				if (!prefix.is_empty()) {
+					CHECK(path.get_file().begins_with(prefix + "-"));
+				}
+			}
+
+			CHECK(DirAccess::exists(path) == keep);
+			if (keep) {
+				CHECK(DirAccess::remove_absolute(path) == OK);
+			}
+		}
+	}
+}
+
 } // namespace TestFileAccess
