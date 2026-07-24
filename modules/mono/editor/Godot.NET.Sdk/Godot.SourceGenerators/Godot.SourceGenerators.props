@@ -1,6 +1,17 @@
 <Project>
+  <Target Name="_GodotPrepareCompilerVisibleAnalyzerProperties" BeforeTargets="GenerateMSBuildEditorConfigFileCore">
+    <PropertyGroup>
+      <!-- Semicolons start comments in editorconfig values, so use a comma-safe
+           transport property while retaining the public semicolon-separated property. -->
+      <GodotDisabledAnalyzersCompilerVisible>$([System.String]::Copy('$(GodotDisabledAnalyzers)').Replace(';', ','))</GodotDisabledAnalyzersCompilerVisible>
+    </PropertyGroup>
+  </Target>
+
   <ItemGroup>
     <!-- $(GodotProjectDir) is defined by Godot.NET.Sdk -->
+    <CompilerVisibleProperty Include="GodotAnalyzers" />
+    <CompilerVisibleProperty Include="GodotDisabledAnalyzers" />
+    <CompilerVisibleProperty Include="GodotDisabledAnalyzersCompilerVisible" />
     <CompilerVisibleProperty Include="GodotDisabledSourceGenerators" />
     <CompilerVisibleProperty Include="GodotProjectDir" />
     <CompilerVisibleProperty Include="GodotProjectDirBase64" />
