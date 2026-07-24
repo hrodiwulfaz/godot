@@ -6394,6 +6394,14 @@ Point2 Tree::get_scroll() const {
 	return ofs;
 }
 
+Rect2 Tree::get_items_clip_rect() const {
+	Rect2 items_rect = _get_content_rect();
+	const real_t title_height = _get_title_button_height();
+	items_rect.position.y += title_height;
+	items_rect.size.y = MAX(0.0f, items_rect.size.y - title_height);
+	return items_rect;
+}
+
 void Tree::scroll_to_item(TreeItem *p_item, bool p_center_on_item) {
 	ERR_FAIL_NULL(p_item);
 
@@ -7272,6 +7280,8 @@ void Tree::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_column_title_language", "column"), &Tree::get_column_title_language);
 
 	ClassDB::bind_method(D_METHOD("get_scroll"), &Tree::get_scroll);
+	ClassDB::bind_method(D_METHOD("get_items_clip_rect"), &Tree::get_items_clip_rect);
+	ClassDB::bind_method(D_METHOD("get_vscroll_bar"), &Tree::get_vscroll_bar);
 	ClassDB::bind_method(D_METHOD("scroll_to_item", "item", "center_on_item"), &Tree::scroll_to_item, DEFVAL(false));
 
 	ClassDB::bind_method(D_METHOD("set_h_scroll_enabled", "h_scroll"), &Tree::set_h_scroll_enabled);

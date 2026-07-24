@@ -214,6 +214,13 @@
 				Returns the tree item at the specified position (relative to the tree origin position).
 			</description>
 		</method>
+		<method name="get_items_clip_rect" qualifiers="const">
+			<return type="Rect2" />
+			<description>
+				Returns the [Tree]-local logical viewport used for item rows. The rectangle is derived from the content area, excludes column titles and visible scrollbars, and always has a nonnegative height.
+				Use this rectangle when placing or clipping item overlays. Do not reconstruct the item viewport from scrollbar geometry.
+			</description>
+		</method>
 		<method name="get_next_selected">
 			<return type="TreeItem" />
 			<param index="0" name="from" type="TreeItem" />
@@ -238,6 +245,13 @@
 			<return type="Vector2" />
 			<description>
 				Returns the current scrolling position.
+			</description>
+		</method>
+		<method name="get_vscroll_bar" qualifiers="const">
+			<return type="VScrollBar" />
+			<description>
+				Returns the actual internal vertical [VScrollBar] used by this [Tree]. Its position, size, visibility, value, page, and inherited [Range] signals can be inspected directly.
+				Use [method get_items_clip_rect] instead when item viewport bounds are needed.
 			</description>
 		</method>
 		<method name="get_selected" qualifiers="const">
