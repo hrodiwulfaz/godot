@@ -145,6 +145,8 @@
 
 #include "modules/modules_enabled.gen.h" // For mono.
 
+#include <optional>
+
 #if defined(MODULE_MONO_ENABLED) && defined(TOOLS_ENABLED)
 #include "modules/mono/editor/bindings_generator.h"
 #endif
@@ -246,9 +248,7 @@ static uint32_t window_flags = 0;
 static Size2i window_size = Size2i(1152, 648);
 
 static int init_screen = DisplayServerEnums::SCREEN_PRIMARY;
-static bool init_fullscreen = false;
-static bool init_maximized = false;
-static bool init_windowed = false;
+static std::optional<DisplayServerEnums::WindowMode> init_window_mode_override;
 static bool init_always_on_top = false;
 static bool init_use_custom_pos = false;
 static bool init_use_custom_screen = false;
@@ -280,6 +280,7 @@ static int max_fps = -1;
 static int frame_delay = 0;
 static int audio_output_latency = 0;
 static bool disable_render_loop = false;
+static bool force_render = false;
 static int fixed_fps = -1;
 static MovieWriter *movie_writer = nullptr;
 static bool disable_vsync = false;
@@ -635,6 +636,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_title("Display options");
 	print_help_option("-f, --fullscreen", "Request fullscreen mode.\n");
 	print_help_option("-m, --maximized", "Request a maximized window.\n");
+	print_help_option("--minimized", "Request a minimized window.\n");
 	print_help_option("-w, --windowed", "Request windowed mode.\n");
 	print_help_option("-t, --always-on-top", "Request an always-on-top window.\n");
 	print_help_option("--resolution <W>x<H>", "Request window resolution.\n");
@@ -681,6 +683,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_option("--time-scale <scale>", "Force time scale (higher values are faster, 1.0 is normal speed).\n");
 	print_help_option("--disable-vsync", "Forces disabling of vertical synchronization, even if enabled in the project settings. Does not override driver-level V-Sync enforcement.\n");
 	print_help_option("--disable-render-loop", "Disable render loop so rendering only occurs when called explicitly from script.\n");
+	print_help_option("--force-render", "Force RenderingServer drawing when no window can draw (testing/debugging only; presentation remains disabled).\n");
 	print_help_option("--disable-crash-handler", "Disable crash handler when supported by the platform code.\n");
 	print_help_option("--fixed-fps <fps>", "Force a fixed number of frames per second. This setting disables real-time synchronization.\n");
 	print_help_option("--delta-smoothing <enable>", "Enable or disable frame delta smoothing [\"enable\", \"disable\"].\n");
@@ -1334,14 +1337,13 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 				goto error;
 			}
 		} else if (arg == "-f" || arg == "--fullscreen") { // force fullscreen
-			init_fullscreen = true;
-			window_mode = DisplayServerEnums::WINDOW_MODE_FULLSCREEN;
+			init_window_mode_override = DisplayServerEnums::WINDOW_MODE_FULLSCREEN;
 		} else if (arg == "-m" || arg == "--maximized") { // force maximized window
-			init_maximized = true;
-			window_mode = DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
+			init_window_mode_override = DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
+		} else if (arg == "--minimized") { // force minimized window
+			init_window_mode_override = DisplayServerEnums::WINDOW_MODE_MINIMIZED;
 		} else if (arg == "-w" || arg == "--windowed") { // force windowed window
-
-			init_windowed = true;
+			init_window_mode_override = DisplayServerEnums::WINDOW_MODE_WINDOWED;
 		} else if (arg == "--gpu-index") {
 			if (N) {
 				Engine::singleton->gpu_idx = N->get().to_int();
@@ -1958,6 +1960,8 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 			}
 		} else if (arg == "--disable-render-loop") {
 			disable_render_loop = true;
+		} else if (arg == "--force-render") {
+			force_render = true;
 		} else if (arg == "--fixed-fps") {
 			if (N) {
 				fixed_fps = N->get().to_int();
@@ -2247,11 +2251,6 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 		// Create initialization lock file to detect crashes during startup.
 		OS::get_singleton()->create_lock_file();
-
-		if (!init_windowed && !init_fullscreen) {
-			init_maximized = true;
-			window_mode = DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
-		}
 	}
 
 	if (project_manager) {
@@ -3177,7 +3176,11 @@ Error Main::setup2(bool p_show_boot_logo) {
 			}
 		}
 
-		bool has_command_line_window_override = init_use_custom_pos || init_use_custom_screen || init_windowed;
+		if (editor) {
+			window_mode = DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
+		}
+
+		bool has_command_line_window_override = init_use_custom_pos || init_use_custom_screen || init_window_mode_override.has_value();
 		if (editor && !has_command_line_window_override && restore_editor_window_layout) {
 			Ref<ConfigFile> config;
 			config.instantiate();
@@ -3189,16 +3192,13 @@ Error Main::setup2(bool p_show_boot_logo) {
 				window_size = config->get_value("EditorWindow", "size", window_size);
 				if (mode == "windowed") {
 					window_mode = DisplayServerEnums::WINDOW_MODE_WINDOWED;
-					init_windowed = true;
 				} else if (mode == "fullscreen") {
 					window_mode = DisplayServerEnums::WINDOW_MODE_FULLSCREEN;
-					init_fullscreen = true;
 				} else {
 					window_mode = DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
-					init_maximized = true;
 				}
 
-				if (init_windowed) {
+				if (window_mode == DisplayServerEnums::WINDOW_MODE_WINDOWED) {
 					init_use_custom_pos = true;
 					init_custom_pos = config->get_value("EditorWindow", "position", Vector2i(0, 0));
 				}
@@ -3212,6 +3212,10 @@ Error Main::setup2(bool p_show_boot_logo) {
 		OS::get_singleton()->benchmark_end_measure("Startup", "Initialize Early Settings");
 	}
 #endif
+
+	if (init_window_mode_override.has_value()) {
+		window_mode = *init_window_mode_override;
+	}
 
 	OS::get_singleton()->benchmark_begin_measure("Startup", "Servers");
 
@@ -3492,7 +3496,7 @@ Error Main::setup2(bool p_show_boot_logo) {
 #ifdef TOOLS_ENABLED
 	// If the editor is running in windowed mode, ensure the window rect fits
 	// the screen in case screen count or position has changed.
-	if (editor && init_windowed) {
+	if (editor && window_mode == DisplayServerEnums::WINDOW_MODE_WINDOWED) {
 		// We still need to check we are actually in windowed mode, because
 		// certain platform might only support one fullscreen window.
 		if (DisplayServer::get_singleton()->window_get_mode() == DisplayServerEnums::WINDOW_MODE_WINDOWED) {
@@ -3642,13 +3646,6 @@ Error Main::setup2(bool p_show_boot_logo) {
 		MAIN_PRINT("Main: Setup Logo");
 
 		if (!init_embed_parent_window_id) {
-			if (init_windowed) {
-				//do none..
-			} else if (init_maximized) {
-				DisplayServer::get_singleton()->window_set_mode(DisplayServerEnums::WINDOW_MODE_MAXIMIZED);
-			} else if (init_fullscreen) {
-				DisplayServer::get_singleton()->window_set_mode(DisplayServerEnums::WINDOW_MODE_FULLSCREEN);
-			}
 			if (init_always_on_top) {
 				DisplayServer::get_singleton()->window_set_flag(DisplayServerEnums::WINDOW_FLAG_ALWAYS_ON_TOP, true);
 			}
@@ -5095,13 +5092,14 @@ bool Main::iteration() {
 
 	GodotProfileZoneGrouped(_profile_zone, "RenderingServer::draw");
 	const bool has_pending_resources_for_processing = RD::get_singleton() && RD::get_singleton()->has_pending_resources_for_processing();
-	bool wants_present = (DisplayServer::get_singleton()->can_any_window_draw() ||
-								 DisplayServer::get_singleton()->has_additional_outputs()) &&
-			RenderingServer::get_singleton()->is_render_loop_enabled();
+	const bool render_loop_enabled = RenderingServer::get_singleton()->is_render_loop_enabled();
+	const bool wants_present = (DisplayServer::get_singleton()->can_any_window_draw() ||
+									   DisplayServer::get_singleton()->has_additional_outputs()) &&
+			render_loop_enabled;
+	const bool force_render_requested = force_render && render_loop_enabled;
 
-	if (wants_present || has_pending_resources_for_processing) {
-		wants_present |= force_redraw_requested;
-		if ((!force_redraw_requested) && OS::get_singleton()->is_in_low_processor_usage_mode()) {
+	if (wants_present || force_render_requested || has_pending_resources_for_processing) {
+		if ((!force_redraw_requested && !force_render_requested) && OS::get_singleton()->is_in_low_processor_usage_mode()) {
 			if (RenderingServer::get_singleton()->has_changed()) {
 				RenderingServer::get_singleton()->draw(wants_present, scaled_step); // flush visual commands
 				Engine::get_singleton()->increment_frames_drawn();
