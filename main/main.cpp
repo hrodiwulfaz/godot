@@ -572,6 +572,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_option("--quit", "Quit after the first iteration.\n");
 	print_help_option("--quit-after <int>", "Quit after the given number of iterations. Set to 0 to disable.\n");
 	print_help_option("-l, --language <locale>", "Use a specific locale (<locale> being a two-letter code).\n");
+	print_help_option("--user-data-dir <directory>", "Use a custom user data directory (takes precedence over executable-adjacent portable.txt).\n");
 #if defined(OVERRIDE_PATH_ENABLED)
 	print_help_option("--path <directory>", "Path to a project (<directory> must contain a \"project.godot\" file).\n", CLI_OPTION_AVAILABILITY_TEMPLATE_UNSAFE);
 	print_help_option("--scene <path>", "Path or UID of a scene in the project that should be started.\n", CLI_OPTION_AVAILABILITY_TEMPLATE_UNSAFE);
@@ -1779,6 +1780,18 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 					"To be able to use it, use the `disable_path_overrides=no` SCons option when compiling Godot.\n");
 			goto error;
 #endif // defined(OVERRIDE_PATH_ENABLED)
+		} else if (arg == "--user-data-dir") {
+			if (N && !N->get().is_empty() && !N->get().begins_with("-")) {
+				String user_data_dir = N->get();
+				if (user_data_dir.is_relative_path()) {
+					user_data_dir = OS::get_singleton()->get_cwd().path_join(user_data_dir);
+				}
+				OS::get_singleton()->set_user_data_dir_override(user_data_dir.simplify_path());
+				N = N->next();
+			} else {
+				OS::get_singleton()->print("Missing directory argument after --user-data-dir, aborting.\n");
+				goto error;
+			}
 		} else if (arg == "--quit") { // Auto quit at the end of the first main loop iteration
 			quit_after = 1;
 #ifdef TOOLS_ENABLED
