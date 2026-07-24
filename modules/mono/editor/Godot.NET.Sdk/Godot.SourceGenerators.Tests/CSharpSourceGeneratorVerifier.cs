@@ -53,12 +53,24 @@ where TSourceGenerator : ISourceGenerator, new()
 
     public static Test MakeVerifier(ICollection<string> sources, ICollection<string> generatedSources)
     {
+        return MakeVerifier(sources, generatedSources, new Dictionary<string, string>());
+    }
+
+    public static Test MakeVerifier(
+        ICollection<string> sources,
+        ICollection<string> generatedSources,
+        IReadOnlyDictionary<string, string> globalOptions)
+    {
         var verifier = new Test();
 
-        verifier.TestState.AnalyzerConfigFiles.Add(("/.globalconfig", $"""
-        is_global = true
-        build_property.GodotProjectDir = {Constants.ExecutingAssemblyPath}
-        """));
+        var config = new StringBuilder();
+        config.AppendLine("is_global = true");
+        config.AppendLine($"build_property.GodotProjectDir = {Constants.ExecutingAssemblyPath}");
+
+        foreach ((string property, string value) in globalOptions)
+            config.AppendLine($"build_property.{property} = {value}");
+
+        verifier.TestState.AnalyzerConfigFiles.Add(("/.globalconfig", config.ToString()));
 
         verifier.TestState.Sources.AddRange(sources.Select(source => (
             source,
