@@ -931,6 +931,7 @@ public:
 	TreeItem *get_item_with_metadata(const Variant &p_find, int p_column = -1) const;
 
 	Point2 get_scroll() const;
+	Rect2 get_items_clip_rect() const;
 	void scroll_to_item(TreeItem *p_item, bool p_center_on_item = false);
 	void set_h_scroll_enabled(bool p_enable);
 	bool is_h_scroll_enabled() const;
@@ -945,7 +946,7 @@ public:
 
 	void set_cursor_can_exit_tree(bool p_enable);
 
-	VScrollBar *get_vscroll_bar() { return v_scroll; }
+	VScrollBar *get_vscroll_bar() const { return v_scroll; }
 
 	void set_hide_folding(bool p_hide);
 	bool is_folding_hidden() const;
