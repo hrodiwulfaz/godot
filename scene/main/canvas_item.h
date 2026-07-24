@@ -110,6 +110,7 @@ private:
 	int z_index = 0;
 	bool z_relative = true;
 	bool y_sort_enabled = false;
+	real_t y_sort_offset = 0.0;
 
 	static constexpr int DEFAULT_FONT_SIZE = 16; // Keep synced with font.h.
 
@@ -327,6 +328,9 @@ public:
 
 	virtual void set_y_sort_enabled(bool p_enabled);
 	virtual bool is_y_sort_enabled() const;
+
+	void set_y_sort_offset(real_t p_offset);
+	real_t get_y_sort_offset() const;
 
 	/* DRAWING API */
 
