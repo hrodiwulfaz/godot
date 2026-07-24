@@ -142,6 +142,7 @@ def get_version_info(module_version_string="", silent=False):
 
     import version
 
+    fork = str(getattr(version, "fork", ""))
     version_info = {
         "short_name": str(version.short_name),
         "name": str(version.name),
@@ -149,6 +150,8 @@ def get_version_info(module_version_string="", silent=False):
         "minor": int(version.minor),
         "patch": int(version.patch),
         "status": str(version.status),
+        "fork": fork,
+        "has_fork": int(bool(fork)),
         "build": str(build_name),
         "module_config": str(version.module_config) + module_version_string,
         "website": str(version.website),

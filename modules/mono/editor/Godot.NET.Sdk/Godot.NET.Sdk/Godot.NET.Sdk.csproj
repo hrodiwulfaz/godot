@@ -18,9 +18,11 @@
     <Authors>Godot Engine contributors</Authors>
 
     <PackageId>Godot.NET.Sdk</PackageId>
-    <Version>4.7.1</Version>
+    <Version>$(PackageVersion_Godot_NET_Sdk)</Version>
     <PackageVersion>$(PackageVersion_Godot_NET_Sdk)</PackageVersion>
-    <RepositoryUrl>https://github.com/godotengine/godot/tree/master/modules/mono/editor/Godot.NET.Sdk</RepositoryUrl>
+    <RepositoryUrl>https://github.com/hrodiwulfaz/godot</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryCommit>$(SourceRevisionId)</RepositoryCommit>
     <PackageProjectUrl>$(RepositoryUrl)</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Copyright>Copyright (c) Godot Engine contributors</Copyright>

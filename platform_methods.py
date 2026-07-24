@@ -66,6 +66,9 @@ def get_build_version(short):
     v = "%d.%d" % (version.major, version.minor)
     if version.patch > 0:
         v += ".%d" % version.patch
+    fork = getattr(version, "fork", "")
+    if fork:
+        v += "-%s" % fork
     status = version.status
     if not short:
         if os.getenv("GODOT_VERSION_STATUS") is not None:
