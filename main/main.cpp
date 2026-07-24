@@ -2215,13 +2215,26 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 #ifdef TOOLS_ENABLED
 	if (editor) {
+		main_args.push_back("--editor");
+	}
+#endif
+
+	OS::get_singleton()->set_cmdline(execpath, main_args, user_args);
+
+	OS::get_singleton()->set_portable_mode(
+			FileAccess::exists(OS::get_singleton()->get_executable_path().get_base_dir().path_join("portable.txt")));
+
+	// The recovery-mode lock is the first user-data consumer for editor startup.
+	OS::get_singleton()->ensure_user_data_dir();
+
+#ifdef TOOLS_ENABLED
+	if (editor) {
 		Engine::get_singleton()->set_editor_hint(true);
 		Engine::get_singleton()->set_extension_reloading_enabled(true);
 
 		// Create initialization lock file to detect crashes during startup.
 		OS::get_singleton()->create_lock_file();
 
-		main_args.push_back("--editor");
 		if (!init_windowed && !init_fullscreen) {
 			init_maximized = true;
 			window_mode = DisplayServerEnums::WINDOW_MODE_MAXIMIZED;
@@ -2242,8 +2255,6 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	}
 #endif
 
-	OS::get_singleton()->set_cmdline(execpath, main_args, user_args);
-
 	Engine::get_singleton()->set_physics_ticks_per_second(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/physics_ticks_per_second", PROPERTY_HINT_RANGE, "1,1000,1"), 60));
 	Engine::get_singleton()->set_max_physics_steps_per_frame(GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "physics/common/max_physics_steps_per_frame", PROPERTY_HINT_RANGE, "1,100,1"), 8));
 	Engine::get_singleton()->set_physics_jitter_fix(GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "physics/common/physics_jitter_fix", PROPERTY_HINT_RANGE, "0,2,0.001,or_greater"), 0.5));
@@ -2251,9 +2262,6 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	if (max_fps >= 0) {
 		Engine::get_singleton()->set_max_fps(max_fps);
 	}
-
-	// Initialize user data dir.
-	OS::get_singleton()->ensure_user_data_dir();
 
 	OS::get_singleton()->set_low_processor_usage_mode(GLOBAL_DEF("application/run/low_processor_mode", false));
 	OS::get_singleton()->set_low_processor_usage_mode_sleep_usec(

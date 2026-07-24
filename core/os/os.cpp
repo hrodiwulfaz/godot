@@ -336,6 +336,11 @@ String OS::get_user_data_dir(const String &p_user_dir) const {
 }
 
 String OS::get_user_data_dir() const {
+	// Portable mode stores user data directly beside the executable.
+	if (_portable_mode) {
+		return get_executable_path().get_base_dir();
+	}
+
 	String appname = get_safe_dir_name(GLOBAL_GET("application/config/name"));
 	if (!appname.is_empty()) {
 		bool use_custom_dir = GLOBAL_GET("application/config/use_custom_user_dir");
@@ -367,21 +372,30 @@ String OS::expand_path(const String &p_path) const {
 	return p_path;
 }
 
+String OS::get_recovery_mode_lock_path(const String &p_user_dir) const {
+	String user_data_dir = _portable_mode || p_user_dir.is_empty() ? get_user_data_dir() : get_user_data_dir(p_user_dir);
+	return user_data_dir.path_join(".recovery_mode_lock");
+}
+
 void OS::create_lock_file() {
 	if (Engine::get_singleton()->is_recovery_mode_hint()) {
 		return;
 	}
 
-	String lock_file_path = get_user_data_dir().path_join(".recovery_mode_lock");
-	Ref<FileAccess> lock_file = FileAccess::open(lock_file_path, FileAccess::WRITE);
+	_recovery_mode_lock_path = get_recovery_mode_lock_path();
+	Ref<FileAccess> lock_file = FileAccess::open(_recovery_mode_lock_path, FileAccess::WRITE);
 	if (lock_file.is_valid()) {
 		lock_file->close();
 	}
 }
 
 void OS::remove_lock_file() {
-	String lock_file_path = get_user_data_dir().path_join(".recovery_mode_lock");
-	DirAccess::remove_absolute(lock_file_path);
+	if (_recovery_mode_lock_path.is_empty()) {
+		return;
+	}
+
+	DirAccess::remove_absolute(_recovery_mode_lock_path);
+	_recovery_mode_lock_path = String();
 }
 
 Error OS::shell_open(const String &p_uri) {
