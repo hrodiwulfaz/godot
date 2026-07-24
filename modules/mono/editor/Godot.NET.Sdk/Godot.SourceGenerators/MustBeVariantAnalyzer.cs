@@ -20,10 +20,23 @@ namespace Godot.SourceGenerators
         {
             context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
             context.EnableConcurrentExecution();
-            context.RegisterSyntaxNodeAction(AnalyzeNode, SyntaxKind.TypeArgumentList);
+            context.RegisterCompilationStartAction(startContext =>
+            {
+                if (startContext.Options.AnalyzerConfigOptionsProvider
+                    .IsGodotAnalyzerDisabled(nameof(MustBeVariantAnalyzer)))
+                {
+                    return;
+                }
+
+                var typeCache = new MarshalUtils.TypeCache(startContext.Compilation);
+
+                startContext.RegisterSyntaxNodeAction(
+                    syntaxContext => AnalyzeNode(syntaxContext, typeCache),
+                    SyntaxKind.TypeArgumentList);
+            });
         }
 
-        private void AnalyzeNode(SyntaxNodeAnalysisContext context)
+        private static void AnalyzeNode(SyntaxNodeAnalysisContext context, MarshalUtils.TypeCache typeCache)
         {
             // Ignore syntax inside comments
             if (IsInsideDocumentation(context.Node))
@@ -36,8 +49,6 @@ namespace Godot.SourceGenerators
             Helper.ThrowIfNull(parentSyntax);
 
             var sm = context.SemanticModel;
-
-            var typeCache = new MarshalUtils.TypeCache(context.Compilation);
 
             for (int i = 0; i < typeArgListSyntax.Arguments.Count; i++)
             {
@@ -99,7 +110,7 @@ namespace Godot.SourceGenerators
         /// </summary>
         /// <param name="syntax">Syntax node to check.</param>
         /// <returns><see langword="true"/> if the syntax node is inside a documentation syntax.</returns>
-        private bool IsInsideDocumentation(SyntaxNode? syntax)
+        private static bool IsInsideDocumentation(SyntaxNode? syntax)
         {
             while (syntax != null)
             {
@@ -125,7 +136,7 @@ namespace Godot.SourceGenerators
         /// <param name="typeArgumentSymbol">The symbol retrieved for the type node syntax.</param>
         /// <param name="typeArgumentIndex"></param>
         /// <returns><see langword="true"/> if the type must be variant and must be analyzed.</returns>
-        private bool ShouldCheckTypeArgument(
+        private static bool ShouldCheckTypeArgument(
             SyntaxNodeAnalysisContext context,
             SyntaxNode parentSyntax,
             ISymbol parentSymbol,

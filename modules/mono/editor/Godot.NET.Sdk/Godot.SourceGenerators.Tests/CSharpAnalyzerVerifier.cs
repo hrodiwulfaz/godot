@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -40,12 +41,17 @@ public static class CSharpAnalyzerVerifier<TAnalyzer>
 
     public static Test MakeVerifier(ICollection<string> sources, params DiagnosticResult[] expected)
     {
+        return MakeVerifier(sources, new Dictionary<string, string>(), expected);
+    }
+
+    public static Test MakeVerifier(
+        ICollection<string> sources,
+        IReadOnlyDictionary<string, string> globalOptions,
+        params DiagnosticResult[] expected)
+    {
         var verifier = new Test();
 
-        verifier.TestState.AnalyzerConfigFiles.Add(("/.globalconfig", $"""
-        is_global = true
-        build_property.GodotProjectDir = {Constants.ExecutingAssemblyPath}
-        """));
+        verifier.TestState.AnalyzerConfigFiles.Add(("/.globalconfig", CreateGlobalConfig(globalOptions)));
 
         verifier.TestState.Sources.AddRange(sources.Select(source =>
         {
@@ -54,5 +60,32 @@ public static class CSharpAnalyzerVerifier<TAnalyzer>
 
         verifier.ExpectedDiagnostics.AddRange(expected);
         return verifier;
+    }
+
+    public static Test MakeInlineVerifier(
+        string source,
+        IReadOnlyDictionary<string, string>? globalOptions = null,
+        params DiagnosticResult[] expected)
+    {
+        var verifier = new Test();
+
+        verifier.TestState.AnalyzerConfigFiles.Add((
+            "/.globalconfig",
+            CreateGlobalConfig(globalOptions ?? new Dictionary<string, string>())));
+        verifier.TestState.Sources.Add(("/Test0.cs", SourceText.From(source)));
+        verifier.ExpectedDiagnostics.AddRange(expected);
+        return verifier;
+    }
+
+    private static string CreateGlobalConfig(IReadOnlyDictionary<string, string> globalOptions)
+    {
+        var config = new StringBuilder();
+        config.AppendLine("is_global = true");
+        config.AppendLine($"build_property.GodotProjectDir = {Constants.ExecutingAssemblyPath}");
+
+        foreach ((string property, string value) in globalOptions)
+            config.AppendLine($"build_property.{property} = {value}");
+
+        return config.ToString();
     }
 }
