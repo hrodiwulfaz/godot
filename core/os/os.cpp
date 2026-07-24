@@ -336,6 +336,11 @@ String OS::get_user_data_dir(const String &p_user_dir) const {
 }
 
 String OS::get_user_data_dir() const {
+	// An explicit command-line override takes precedence over portable mode.
+	if (!_user_data_dir_override.is_empty()) {
+		return _user_data_dir_override;
+	}
+
 	// Portable mode stores user data directly beside the executable.
 	if (_portable_mode) {
 		return get_executable_path().get_base_dir();
@@ -373,7 +378,9 @@ String OS::expand_path(const String &p_path) const {
 }
 
 String OS::get_recovery_mode_lock_path(const String &p_user_dir) const {
-	String user_data_dir = _portable_mode || p_user_dir.is_empty() ? get_user_data_dir() : get_user_data_dir(p_user_dir);
+	String user_data_dir = !_user_data_dir_override.is_empty() || _portable_mode || p_user_dir.is_empty() ?
+			get_user_data_dir() :
+			get_user_data_dir(p_user_dir);
 	return user_data_dir.path_join(".recovery_mode_lock");
 }
 
