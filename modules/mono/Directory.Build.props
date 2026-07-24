@@ -3,4 +3,7 @@
     <GodotSdkPackageVersionsFilePath>$(MSBuildThisFileDirectory)\SdkPackageVersions.props</GodotSdkPackageVersionsFilePath>
   </PropertyGroup>
   <Import Project="$(GodotSdkPackageVersionsFilePath)" />
+  <PropertyGroup>
+    <Version Condition=" '$(Version)' == '' ">$(PackageVersion_GodotSharp)</Version>
+  </PropertyGroup>
 </Project>

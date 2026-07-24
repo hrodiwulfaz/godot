@@ -147,7 +147,13 @@ def find_any_msbuild_tool(mono_prefix):
     return None
 
 
-def run_msbuild(tools: ToolsLocation, sln: str, chdir_to: str, msbuild_args: list[str] | None = None):
+def run_msbuild(
+    tools: ToolsLocation,
+    sln: str,
+    chdir_to: str,
+    msbuild_args: list[str] | None = None,
+    source_commit: str = "",
+):
     using_msbuild_mono = False
 
     # Preference order: dotnet CLI > Standalone MSBuild > Mono's MSBuild
@@ -165,6 +171,9 @@ def run_msbuild(tools: ToolsLocation, sln: str, chdir_to: str, msbuild_args: lis
 
     if msbuild_args:
         args += msbuild_args
+
+    if source_commit:
+        args += ["/p:SourceRevisionId=" + source_commit, "/p:RepositoryCommit=" + source_commit]
 
     print("Running MSBuild: ", " ".join(shlex.quote(arg) for arg in args), flush=True)
 
@@ -188,7 +197,9 @@ def run_msbuild(tools: ToolsLocation, sln: str, chdir_to: str, msbuild_args: lis
     return subprocess.call(args, env=msbuild_env, cwd=chdir_to)
 
 
-def build_godot_api(msbuild_tool, module_dir, output_dir, push_nupkgs_local, precision, no_deprecated, werror):
+def build_godot_api(
+    msbuild_tool, module_dir, output_dir, push_nupkgs_local, precision, no_deprecated, werror, source_commit
+):
     target_filenames = [
         "GodotSharp.dll",
         "GodotSharp.pdb",
@@ -217,7 +228,9 @@ def build_godot_api(msbuild_tool, module_dir, output_dir, push_nupkgs_local, pre
             args += ["/p:TreatWarningsAsErrors=true"]
 
         sln = os.path.join(module_dir, "glue/GodotSharp/GodotSharp.sln")
-        exit_code = run_msbuild(msbuild_tool, sln=sln, chdir_to=module_dir, msbuild_args=args)
+        exit_code = run_msbuild(
+            msbuild_tool, sln=sln, chdir_to=module_dir, msbuild_args=args, source_commit=source_commit
+        )
         if exit_code != 0:
             return exit_code
 
@@ -263,12 +276,14 @@ def generate_sdk_package_versions():
     root_path = dirname(dirname(dirname(script_path)))
 
     sys.path.insert(0, root_path)
-    from methods import get_version_info
+    from methods import get_git_info, get_version_info
 
     version_info = get_version_info("")
+    git_info = get_git_info()
     sys.path.remove(root_path)
 
     version_status = version_info["status"]
+    fork_version = version_info["fork"]
     godotsharp_version_str = "{major}.{minor}.{patch}".format(**version_info)
     godot_dotnet_version_str = "{major}.{minor}.{patch}".format(**version_info)
     if version_status == "stable":
@@ -302,6 +317,9 @@ def generate_sdk_package_versions():
 
         godotsharp_version_str += f"-{godotsharp_version_status}"
         godot_dotnet_version_str += f"-{godot_dotnet_version_status}"
+
+    if fork_version:
+        godotsharp_version_str += ("-" if version_status == "stable" else ".") + fork_version
 
     import version
 
@@ -356,16 +374,20 @@ def generate_sdk_package_versions():
     with open(os.path.join(generators_dir, "Common.Constants.cs"), "w", encoding="utf-8", newline="\n") as f:
         f.write(constants)
 
+    return git_info["git_hash"]
+
 
 def build_all(
     msbuild_tool, module_dir, output_dir, godot_platform, dev_debug, push_nupkgs_local, precision, no_deprecated, werror
 ):
     # Generate SdkPackageVersions.props and VersionDocsUrl constant
-    generate_sdk_package_versions()
+    source_commit = generate_sdk_package_versions()
+    if source_commit:
+        print(f"Managed artifact source commit: {source_commit}", flush=True)
 
     # Godot API
     exit_code = build_godot_api(
-        msbuild_tool, module_dir, output_dir, push_nupkgs_local, precision, no_deprecated, werror
+        msbuild_tool, module_dir, output_dir, push_nupkgs_local, precision, no_deprecated, werror, source_commit
     )
     if exit_code != 0:
         return exit_code
@@ -379,7 +401,9 @@ def build_all(
         args += ["/p:ClearNuGetLocalCache=true", "/p:PushNuGetToLocalSource=" + push_nupkgs_local]
     if precision == "double":
         args += ["/p:GodotFloat64=true"]
-    exit_code = run_msbuild(msbuild_tool, sln=sln, chdir_to=module_dir, msbuild_args=args)
+    exit_code = run_msbuild(
+        msbuild_tool, sln=sln, chdir_to=module_dir, msbuild_args=args, source_commit=source_commit
+    )
     if exit_code != 0:
         return exit_code
 
@@ -392,7 +416,9 @@ def build_all(
     if no_deprecated:
         args += ["/p:GodotNoDeprecated=true"]
     sln = os.path.join(module_dir, "editor/Godot.NET.Sdk/Godot.NET.Sdk.sln")
-    exit_code = run_msbuild(msbuild_tool, sln=sln, chdir_to=module_dir, msbuild_args=args)
+    exit_code = run_msbuild(
+        msbuild_tool, sln=sln, chdir_to=module_dir, msbuild_args=args, source_commit=source_commit
+    )
     if exit_code != 0:
         return exit_code
 
