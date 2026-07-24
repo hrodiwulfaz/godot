@@ -895,7 +895,7 @@ ProjectList::Item ProjectList::load_project_data(const String &p_path, bool p_fa
 		user_dir = OS::get_singleton()->get_godot_dir_name().path_join("app_userdata").path_join("[unnamed project]");
 	}
 
-	String recovery_mode_lock_file = OS::get_singleton()->get_user_data_dir(user_dir).path_join(".recovery_mode_lock");
+	String recovery_mode_lock_file = OS::get_singleton()->get_recovery_mode_lock_path(user_dir);
 	recovery_mode = FileAccess::exists(recovery_mode_lock_file);
 
 	return Item(project_name, description, project_version, tags, p_path, icon, main_scene, unsupported_features, last_edited, p_favorite, grayed, missing, recovery_mode, config_version);
