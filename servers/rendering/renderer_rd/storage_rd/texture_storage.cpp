@@ -1614,7 +1614,10 @@ RID TextureStorage::texture_create_from_native_handle(RSE::TextureType p_type, I
 }
 
 void TextureStorage::_texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer, bool p_immediate) {
-	ERR_FAIL_COND(p_image.is_null() || p_image->is_empty());
+	if (p_image.is_null() || p_image->is_empty()) {
+		WARN_VERBOSE(vformat("Ignoring 2D texture update with a null or empty image (texture RID: %d, layer: %d).", p_texture.get_id(), p_layer));
+		return;
+	}
 
 	Texture *tex = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL(tex);
