@@ -157,6 +157,7 @@ Dictionary Engine::get_version_info() const {
 	dict["patch"] = GODOT_VERSION_PATCH;
 	dict["hex"] = GODOT_VERSION_HEX;
 	dict["status"] = GODOT_VERSION_STATUS;
+	dict["fork"] = GODOT_VERSION_FORK;
 	dict["build"] = GODOT_VERSION_BUILD;
 
 	String hash = String(GODOT_VERSION_HASH);
@@ -164,10 +165,7 @@ Dictionary Engine::get_version_info() const {
 
 	dict["timestamp"] = GODOT_VERSION_TIMESTAMP;
 
-	String stringver = String(dict["major"]) + "." + String(dict["minor"]);
-	if ((int)dict["patch"] != 0) {
-		stringver += "." + String(dict["patch"]);
-	}
+	String stringver = GODOT_VERSION_RELEASE;
 	stringver += "-" + String(dict["status"]) + " (" + String(dict["build"]) + ")";
 	dict["string"] = stringver;
 

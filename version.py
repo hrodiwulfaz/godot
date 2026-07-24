@@ -4,6 +4,7 @@ major = 4
 minor = 7
 patch = 1
 status = "stable"
+fork = "outpostia.1"
 module_config = ""
 website = "https://godotengine.org"
 docs = "4.7"

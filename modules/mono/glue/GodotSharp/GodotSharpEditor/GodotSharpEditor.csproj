@@ -15,9 +15,11 @@
     <Authors>Godot Engine contributors</Authors>
 
     <PackageId>GodotSharpEditor</PackageId>
-    <Version>4.7.1</Version>
+    <Version>$(PackageVersion_GodotSharp)</Version>
     <PackageVersion>$(PackageVersion_GodotSharp)</PackageVersion>
-    <RepositoryUrl>https://github.com/godotengine/godot/tree/master/modules/mono/glue/GodotSharp/GodotSharpEditor</RepositoryUrl>
+    <RepositoryUrl>https://github.com/hrodiwulfaz/godot</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryCommit>$(SourceRevisionId)</RepositoryCommit>
     <PackageProjectUrl>$(RepositoryUrl)</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Copyright>Copyright (c) Godot Engine contributors</Copyright>
