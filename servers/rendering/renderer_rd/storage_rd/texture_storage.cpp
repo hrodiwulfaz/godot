@@ -1999,15 +1999,12 @@ void TextureStorage::texture_drawable_generate_mipmaps(RID p_texture) {
 	int width = tex->width;
 	int height = tex->height;
 
-	RID source = tex->rd_texture;
-	RID dest = tex->cached_rd_slices[0];
-
 	for (uint32_t m = 1; m < mipmaps; m++) {
 		width = MAX(1, width >> 1);
 		height = MAX(1, height >> 1);
 
-		source = dest;
-		dest = RD::get_singleton()->texture_create_shared_from_slice(RD::TextureView(), source, 0, m, 1, RD::TEXTURE_SLICE_2D);
+		RID source = tex->cached_rd_slices[m - 1];
+		RID dest = tex->cached_rd_slices[m];
 
 		if (copy_effects->get_raster_effects().has_flag(CopyEffects::RASTER_EFFECT_COPY)) {
 			copy_effects->make_mipmap_raster(source, dest, Size2i(width, height));
