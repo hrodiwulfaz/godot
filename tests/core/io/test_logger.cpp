@@ -37,6 +37,7 @@ TEST_FORCE_LINK(test_logger)
 #include "core/io/file_access.h"
 #include "core/io/logger.h"
 #include "core/os/os.h"
+#include "tests/test_tools.h"
 
 namespace TestLogger {
 
@@ -73,6 +74,19 @@ TEST_CASE("[Logger][RotatedFileLogger] Creates the first log file and logs on it
 	Ref<FileAccess> log = FileAccess::open("user://logs/godot.log", FileAccess::READ, &err);
 	CHECK_EQ(err, Error::OK);
 	CHECK_EQ(log->get_as_text(), waiting_for_godot);
+
+	cleanup_logs();
+}
+
+TEST_CASE("[Logger][RotatedFileLogger] Reports an unwritable log path without crashing") {
+	initialize_logs();
+
+	ErrorDetector error_detector;
+	ERR_PRINT_OFF;
+	RotatedFileLogger logger("user://logs");
+	logger.logf("%s", "This message has no writable destination");
+	ERR_PRINT_ON;
+	CHECK(error_detector.has_error);
 
 	cleanup_logs();
 }
