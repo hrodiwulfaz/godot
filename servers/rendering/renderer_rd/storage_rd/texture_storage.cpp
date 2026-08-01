@@ -61,6 +61,12 @@ TextureStorage::CanvasTexture::~CanvasTexture() {
 // TextureStorage::Texture
 
 void TextureStorage::Texture::cleanup() {
+	for (const RID &slice : cached_rd_slices) {
+		if (RD::get_singleton()->texture_is_valid(slice)) {
+			RD::get_singleton()->free_rid(slice);
+		}
+	}
+	cached_rd_slices.clear();
 	if (RD::get_singleton()->texture_is_valid(rd_texture_srgb)) {
 		//erase this first, as it's a dependency of the one below
 		RD::get_singleton()->free_rid(rd_texture_srgb);
@@ -1295,6 +1301,7 @@ void TextureStorage::texture_proxy_initialize(RID p_texture, RID p_base) {
 	Texture *tex = texture_owner.get_or_null(p_base);
 	ERR_FAIL_NULL(tex);
 	Texture proxy_tex = *tex;
+	proxy_tex.cached_rd_slices.clear();
 
 	proxy_tex.rd_view.format_override = tex->rd_format;
 	proxy_tex.rd_texture = RD::get_singleton()->texture_create_shared(proxy_tex.rd_view, tex->rd_texture);
@@ -1312,12 +1319,17 @@ void TextureStorage::texture_proxy_initialize(RID p_texture, RID p_base) {
 	tex->proxies.push_back(p_texture);
 }
 
-void TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) {
+Error TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) {
 	// Near identical to  Texture_2D_initialize, Generates an empty white image based on parameters
 
+	Texture empty_texture = {};
+	texture_owner.initialize_rid(p_texture, empty_texture);
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_CANT_CREATE);
+
 	// GUARDRAIL: Bad Widths/Heights
-	ERR_FAIL_COND_MSG(p_width <= 0 || p_height <= 0, "Drawable Texture Width or Height cannot be less than 1.");
-	ERR_FAIL_COND_MSG(p_width >= 16384 || p_height >= 16384, "Drawable Texture Width or Height cannot be greater than 16383.");
+	ERR_FAIL_COND_V_MSG(p_width <= 0 || p_height <= 0, ERR_INVALID_PARAMETER, "Drawable Texture Width or Height cannot be less than 1.");
+	ERR_FAIL_COND_V_MSG(p_width > 16384 || p_height > 16384, ERR_INVALID_PARAMETER, "Drawable Texture Width or Height cannot be greater than 16384.");
 
 	Image::Format format;
 	switch (p_format) {
@@ -1334,47 +1346,49 @@ void TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int
 			format = Image::FORMAT_RGBAF;
 			break;
 		default:
-			format = Image::FORMAT_RGBA8;
+			return ERR_INVALID_PARAMETER;
 	}
 
 	Ref<Image> image = Image::create_empty(p_width, p_height, p_with_mipmaps, format);
+	ERR_FAIL_COND_V(image.is_null(), ERR_CANT_CREATE);
 	image->fill(p_color);
 	TextureToRDFormat ret_format;
 
 	Ref<Image> valid_image = _validate_texture_format(image, ret_format);
-	Texture texture;
+	ERR_FAIL_COND_V(valid_image.is_null(), ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V(valid_image->get_format() != image->get_format(), ERR_UNAVAILABLE);
 
-	texture.type = TextureStorage::TYPE_2D;
+	texture->type = TextureStorage::TYPE_2D;
 
-	texture.width = p_width;
-	texture.height = p_height;
-	texture.layers = 1;
-	texture.mipmaps = image->get_mipmap_count() + 1;
-	texture.depth = 1;
-	texture.format = image->get_format();
-	texture.validated_format = image->get_format();
-	texture.drawable_type = p_format;
+	texture->width = p_width;
+	texture->height = p_height;
+	texture->layers = 1;
+	texture->mipmaps = image->get_mipmap_count() + 1;
+	texture->depth = 1;
+	texture->format = image->get_format();
+	texture->validated_format = valid_image->get_format();
+	texture->drawable_type = p_format;
 
-	texture.rd_type = RD::TEXTURE_TYPE_2D;
-	texture.rd_format = ret_format.format;
-	texture.rd_format_srgb = ret_format.format_srgb;
+	texture->rd_type = RD::TEXTURE_TYPE_2D;
+	texture->rd_format = ret_format.format;
+	texture->rd_format_srgb = ret_format.format_srgb;
 
 	RD::TextureFormat rd_format;
 	RD::TextureView rd_view;
 	{ //attempt register
-		rd_format.format = texture.rd_format;
-		rd_format.width = texture.width;
-		rd_format.height = texture.height;
+		rd_format.format = texture->rd_format;
+		rd_format.width = texture->width;
+		rd_format.height = texture->height;
 		rd_format.depth = 1;
 		rd_format.array_layers = 1;
-		rd_format.mipmaps = texture.mipmaps;
-		rd_format.texture_type = texture.rd_type;
+		rd_format.mipmaps = texture->mipmaps;
+		rd_format.texture_type = texture->rd_type;
 		rd_format.samples = RD::TEXTURE_SAMPLES_1;
 		// The Color Attachment Usage bit here is what differentiates a DrawableTexture from a regular Texture2D
 		rd_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
-		if (texture.rd_format_srgb != RD::DATA_FORMAT_MAX) {
-			rd_format.shareable_formats.push_back(texture.rd_format);
-			rd_format.shareable_formats.push_back(texture.rd_format_srgb);
+		if (texture->rd_format_srgb != RD::DATA_FORMAT_MAX) {
+			rd_format.shareable_formats.push_back(texture->rd_format);
+			rd_format.shareable_formats.push_back(texture->rd_format_srgb);
 		}
 	}
 	{
@@ -1384,33 +1398,34 @@ void TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int
 		rd_view.swizzle_a = ret_format.swizzle_a;
 	}
 
-	Vector<uint8_t> data = image->get_data(); //use image data
+	Vector<uint8_t> data = valid_image->get_data(); //use validated image data
 	Vector<Vector<uint8_t>> data_slices;
 	data_slices.push_back(data);
-	texture.rd_texture = RD::get_singleton()->texture_create(rd_format, rd_view, data_slices);
-	ERR_FAIL_COND(texture.rd_texture.is_null());
-	if (texture.rd_format_srgb != RD::DATA_FORMAT_MAX) {
-		rd_view.format_override = texture.rd_format_srgb;
-		texture.rd_texture_srgb = RD::get_singleton()->texture_create_shared(rd_view, texture.rd_texture);
-		if (texture.rd_texture_srgb.is_null()) {
-			RD::get_singleton()->free_rid(texture.rd_texture);
-			ERR_FAIL_COND(texture.rd_texture_srgb.is_null());
+	texture->rd_texture = RD::get_singleton()->texture_create(rd_format, rd_view, data_slices);
+	ERR_FAIL_COND_V(texture->rd_texture.is_null(), ERR_CANT_CREATE);
+	if (texture->rd_format_srgb != RD::DATA_FORMAT_MAX) {
+		rd_view.format_override = texture->rd_format_srgb;
+		texture->rd_texture_srgb = RD::get_singleton()->texture_create_shared(rd_view, texture->rd_texture);
+		if (texture->rd_texture_srgb.is_null()) {
+			return ERR_CANT_CREATE;
 		}
 	}
 
 	// Used for Drawable Textures.
-	for (int i = 0; i < texture.mipmaps; i++) {
-		texture.cached_rd_slices.append(RD::get_singleton()->texture_create_shared_from_slice(RD::TextureView(), texture.rd_texture, 0, i));
+	for (int i = 0; i < texture->mipmaps; i++) {
+		RID slice = RD::get_singleton()->texture_create_shared_from_slice(RD::TextureView(), texture->rd_texture, 0, i);
+		ERR_FAIL_COND_V(slice.is_null(), ERR_CANT_CREATE);
+		texture->cached_rd_slices.append(slice);
 	}
 
 	//used for 2D, overridable
-	texture.width_2d = texture.width;
-	texture.height_2d = texture.height;
-	texture.is_render_target = false;
-	texture.rd_view = rd_view;
-	texture.is_proxy = false;
-
-	texture_owner.initialize_rid(p_texture, texture);
+	texture->width_2d = texture->width;
+	texture->height_2d = texture->height;
+	texture->is_render_target = false;
+	texture->rd_view = rd_view;
+	texture->is_proxy = false;
+	texture->drawable_generation = 1;
+	return OK;
 }
 
 // Note: We make some big assumptions about format and usage. If developers need more control,
@@ -1710,6 +1725,7 @@ void TextureStorage::texture_proxy_update(RID p_texture, RID p_proxy_to) {
 	CanvasTexture *canvas_texture = tex->canvas_texture;
 
 	*tex = *proxy_to;
+	tex->cached_rd_slices.clear();
 
 	tex->proxy_to = p_proxy_to;
 	tex->is_render_target = false;
@@ -1865,6 +1881,90 @@ void TextureStorage::texture_drawable_blit_rect(const TypedArray<RID> &p_texture
 	RD::get_singleton()->draw_command_end_label();
 }
 
+Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != TextureStorage::TYPE_2D || texture->is_proxy || texture->is_render_target, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+	ERR_FAIL_COND_V(p_layer != 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_image.is_null() || p_image->has_mipmaps(), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_destination_region.position.x < 0 || p_destination_region.position.y < 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_destination_region.size.x <= 0 || p_destination_region.size.y <= 0, ERR_INVALID_PARAMETER);
+
+	const int mip_width = MAX(1, texture->width >> p_mipmap);
+	const int mip_height = MAX(1, texture->height >> p_mipmap);
+	ERR_FAIL_COND_V(int64_t(p_destination_region.position.x) + p_destination_region.size.x > mip_width, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(int64_t(p_destination_region.position.y) + p_destination_region.size.y > mip_height, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_image->get_width() != p_destination_region.size.x || p_image->get_height() != p_destination_region.size.y, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_image->get_format() != texture->format, ERR_INVALID_DATA);
+	ERR_FAIL_COND_V(texture->validated_format != texture->format, ERR_UNAVAILABLE);
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return ERR_UNAVAILABLE;
+	}
+
+	const int bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	const int64_t expected_size = int64_t(p_destination_region.size.x) * p_destination_region.size.y * bytes_per_pixel;
+	const Vector<uint8_t> data = p_image->get_data();
+	ERR_FAIL_COND_V(data.size() != expected_size, ERR_INVALID_DATA);
+
+	Error error = RD::get_singleton()->texture_update_region(texture->rd_texture, 0, p_mipmap, p_destination_region, data);
+	if (error == OK) {
+		texture->image_cache_2d.unref();
+	}
+	return error;
+}
+
+Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer) const {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, Ref<Image>());
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != TextureStorage::TYPE_2D || texture->is_proxy || texture->is_render_target, Ref<Image>());
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, Ref<Image>());
+	ERR_FAIL_COND_V(p_layer != 0, Ref<Image>());
+	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, Ref<Image>());
+	ERR_FAIL_COND_V(texture->validated_format != texture->format, Ref<Image>());
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return Ref<Image>();
+	}
+
+	const int bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	int64_t mipmap_offset = 0;
+	for (int mipmap = 0; mipmap < p_mipmap; mipmap++) {
+		mipmap_offset += int64_t(MAX(1, texture->width >> mipmap)) * MAX(1, texture->height >> mipmap) * bytes_per_pixel;
+	}
+	const int width = MAX(1, texture->width >> p_mipmap);
+	const int height = MAX(1, texture->height >> p_mipmap);
+	const int64_t expected_size = int64_t(width) * height * bytes_per_pixel;
+	ERR_FAIL_COND_V(expected_size <= 0 || expected_size > INT32_MAX, Ref<Image>());
+
+	const Vector<uint8_t> layer_data = RD::get_singleton()->texture_get_data(texture->rd_texture, p_layer);
+	ERR_FAIL_COND_V(mipmap_offset + expected_size > layer_data.size(), Ref<Image>());
+	Vector<uint8_t> data;
+	data.resize(expected_size);
+	memcpy(data.ptrw(), layer_data.ptr() + mipmap_offset, expected_size);
+	return Image::create_from_data(width, height, false, texture->format, data);
+}
+
+uint64_t TextureStorage::texture_drawable_get_generation(RID p_texture) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	if (texture == nullptr || texture->is_proxy || texture->type != TextureStorage::TYPE_2D) {
+		return 0;
+	}
+	return texture->drawable_generation;
+}
+
 //these two APIs can be used together or in combination with the others.
 void TextureStorage::texture_2d_placeholder_initialize(RID p_texture) {
 	texture_2d_initialize(p_texture, texture_2d_placeholder);
@@ -1992,6 +2092,8 @@ Vector<Ref<Image>> TextureStorage::texture_3d_get(RID p_texture) const {
 
 void TextureStorage::texture_drawable_generate_mipmaps(RID p_texture) {
 	Texture *tex = get_texture(p_texture);
+	ERR_FAIL_NULL(tex);
+	ERR_FAIL_COND(tex->cached_rd_slices.size() < int(tex->mipmaps));
 	CopyEffects *copy_effects = CopyEffects::get_singleton();
 	ERR_FAIL_NULL(copy_effects);
 
@@ -2031,20 +2133,16 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 		return;
 	}
 
-	if (tex->rd_texture_srgb.is_valid()) {
-		RD::get_singleton()->free_rid(tex->rd_texture_srgb);
-	}
-	RD::get_singleton()->free_rid(tex->rd_texture);
-
-	if (tex->canvas_texture) {
-		memdelete(tex->canvas_texture);
-		tex->canvas_texture = nullptr;
-	}
+	const uint64_t previous_generation = tex->drawable_generation;
+	tex->cleanup();
 
 	Vector<RID> proxies_to_update = tex->proxies;
 	Vector<RID> proxies_to_redirect = by_tex->proxies;
 
 	*tex = *by_tex;
+	if (previous_generation != 0 && tex->drawable_generation != 0) {
+		tex->drawable_generation = previous_generation == UINT64_MAX ? UINT64_MAX : previous_generation + 1;
+	}
 
 	tex->proxies = proxies_to_update; //restore proxies, so they can be updated
 

@@ -1288,6 +1288,18 @@
 				[b]Note:[/b] The existing [param texture] requires the [constant TEXTURE_USAGE_CAN_UPDATE_BIT] to be updatable.
 			</description>
 		</method>
+		<method name="texture_update_region">
+			<return type="int" enum="Error" />
+			<param index="0" name="texture" type="RID" />
+			<param index="1" name="layer" type="int" />
+			<param index="2" name="mipmap" type="int" />
+			<param index="3" name="region" type="Rect2i" />
+			<param index="4" name="data" type="PackedByteArray" />
+			<description>
+				Updates one exact uncompressed 2D [param region] of a texture layer and mipmap. The byte array must contain exactly [param region]'s tightly packed texels in the texture's existing format. Preflight validation failures leave the texture unchanged. A late staging or submission failure may leave a partial update; retire the destination or completely overwrite it before use.
+				[b]Note:[/b] The texture requires [constant TEXTURE_USAGE_CAN_UPDATE_BIT], must not be multisampled or 3D, and cannot be bound by an active draw list.
+			</description>
+		</method>
 		<method name="tlas_build" experimental="">
 			<return type="int" enum="Error" />
 			<param index="0" name="tlas" type="RID" />

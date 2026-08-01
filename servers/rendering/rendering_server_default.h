@@ -216,7 +216,24 @@ public:
 	FUNCRIDTEX6(texture_3d, Image::Format, int, int, int, bool, const Vector<Ref<Image>> &)
 	FUNCRIDTEX3(texture_external, int, int, uint64_t)
 	FUNCRIDTEX1(texture_proxy, RID)
-	FUNCRIDTEX5(texture_drawable, int, int, RSE::TextureDrawableFormat, const Color &, bool)
+	virtual RID texture_drawable_create(int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) override {
+		RID texture = RSG::texture_storage->texture_allocate();
+		if (texture.is_null()) {
+			return RID();
+		}
+
+		Error error;
+		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) {
+			error = RSG::texture_storage->texture_drawable_initialize(texture, p_width, p_height, p_format, p_color, p_with_mipmaps);
+		} else {
+			command_queue.push_and_ret(RSG::texture_storage, &RendererTextureStorage::texture_drawable_initialize, &error, texture, p_width, p_height, p_format, p_color, p_with_mipmaps);
+		}
+		if (error != OK) {
+			free_rid(texture);
+			return RID();
+		}
+		return texture;
+	}
 
 	// Called directly, not through the command queue.
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) override {
@@ -230,6 +247,9 @@ public:
 	FUNC2(texture_proxy_update, RID, RID)
 
 	FUNC6(texture_drawable_blit_rect, const TypedArray<RID> &, const Rect2i &, RID, const Color &, const TypedArray<RID> &, int)
+	FUNC6R(Error, texture_drawable_update_subresource, RID, const Ref<Image> &, const Rect2i &, int, uint64_t, int)
+	FUNC4RC(Ref<Image>, texture_drawable_get_subresource, RID, int, uint64_t, int)
+	FUNC1RC(uint64_t, texture_drawable_get_generation, RID)
 
 	//these also go pass-through
 	FUNCRIDTEX0(texture_2d_placeholder)

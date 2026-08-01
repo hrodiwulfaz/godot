@@ -1203,12 +1203,17 @@ void TextureStorage::texture_proxy_initialize(RID p_texture, RID p_base) {
 	texture_owner.initialize_rid(p_texture, proxy_tex);
 }
 
-void TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) {
+Error TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) {
 	// Behaves identically to Texture_2D_Initialize by generating a white image based on parameters.
 
+	Texture initial_texture;
+	texture_owner.initialize_rid(p_texture, initial_texture);
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_CANT_CREATE);
+
 	// GUARDRAIL: Bad Widths/Heights
-	ERR_FAIL_COND_MSG(p_width <= 0 || p_height <= 0, "Drawable Texture Width or Height cannot be less than 1.");
-	ERR_FAIL_COND_MSG(p_width >= 16384 || p_height >= 16384, "Drawable Texture Width or Height cannot be greater than 16383.");
+	ERR_FAIL_COND_V_MSG(p_width <= 0 || p_height <= 0, ERR_INVALID_PARAMETER, "Drawable Texture Width or Height cannot be less than 1.");
+	ERR_FAIL_COND_V_MSG(p_width > 16384 || p_height > 16384, ERR_INVALID_PARAMETER, "Drawable Texture Width or Height cannot be greater than 16384.");
 
 	Image::Format format;
 	switch (p_format) {
@@ -1225,28 +1230,36 @@ void TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, int
 			format = Image::FORMAT_RGBAF;
 			break;
 		default:
-			format = Image::FORMAT_RGBA8;
+			return ERR_INVALID_PARAMETER;
 	}
 
 	Ref<Image> image = Image::create_empty(p_width, p_height, p_with_mipmaps, format);
+	ERR_FAIL_COND_V(image.is_null(), ERR_CANT_CREATE);
 	image->fill(p_color);
-	Texture texture;
-	texture.width = image->get_width();
-	texture.height = image->get_height();
-	texture.alloc_width = texture.width;
-	texture.alloc_height = texture.height;
-	texture.mipmaps = image->get_mipmap_count() + 1;
-	texture.format = image->get_format();
-	texture.drawable_type = p_format;
-	texture.type = Texture::TYPE_2D;
-	texture.target = GL_TEXTURE_2D;
-	_get_gl_image_and_format(Ref<Image>(), texture.format, texture.real_format, texture.gl_format_cache, texture.gl_internal_format_cache, texture.gl_type_cache, texture.compressed, false);
-	texture.total_data_size = image->get_image_data_size(texture.width, texture.height, texture.format, texture.mipmaps);
-	texture.active = true;
-	glGenTextures(1, &texture.tex_id);
-	GLES3::Utilities::get_singleton()->texture_allocated_data(texture.tex_id, texture.total_data_size, "Texture 2D");
-	texture_owner.initialize_rid(p_texture, texture);
+
+	texture->width = image->get_width();
+	texture->height = image->get_height();
+	texture->alloc_width = texture->width;
+	texture->alloc_height = texture->height;
+	texture->mipmaps = image->get_mipmap_count() + 1;
+	texture->format = image->get_format();
+	texture->drawable_type = p_format;
+	texture->type = Texture::TYPE_2D;
+	texture->target = GL_TEXTURE_2D;
+	_get_gl_image_and_format(Ref<Image>(), texture->format, texture->real_format, texture->gl_format_cache, texture->gl_internal_format_cache, texture->gl_type_cache, texture->compressed, false);
+	ERR_FAIL_COND_V(texture->compressed, ERR_UNAVAILABLE);
+	texture->total_data_size = image->get_image_data_size(texture->width, texture->height, texture->format, texture->mipmaps);
+	texture->active = true;
+
+	while (glGetError() != GL_NO_ERROR) {
+	}
+	glGenTextures(1, &texture->tex_id);
+	ERR_FAIL_COND_V(texture->tex_id == 0, ERR_CANT_CREATE);
+	GLES3::Utilities::get_singleton()->texture_allocated_data(texture->tex_id, texture->total_data_size, "Texture 2D");
 	texture_set_data(p_texture, image);
+	ERR_FAIL_COND_V(glGetError() != GL_NO_ERROR, ERR_CANT_CREATE);
+	texture->drawable_generation = 1;
+	return OK;
 }
 
 RID TextureStorage::texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers, RSE::TextureLayeredType p_layered_type) {
@@ -1494,6 +1507,130 @@ void TextureStorage::texture_drawable_blit_rect(const TypedArray<RID> &p_texture
 
 	// Reset to system FBO
 	glBindFramebuffer(GL_FRAMEBUFFER, GLES3::TextureStorage::system_fbo);
+}
+
+Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != Texture::TYPE_2D || texture->target != GL_TEXTURE_2D || texture->is_proxy || texture->is_render_target, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+	ERR_FAIL_COND_V(p_layer != 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_image.is_null() || p_image->has_mipmaps(), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_destination_region.position.x < 0 || p_destination_region.position.y < 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_destination_region.size.x <= 0 || p_destination_region.size.y <= 0, ERR_INVALID_PARAMETER);
+
+	const int mip_width = MAX(1, texture->width >> p_mipmap);
+	const int mip_height = MAX(1, texture->height >> p_mipmap);
+	ERR_FAIL_COND_V(int64_t(p_destination_region.position.x) + p_destination_region.size.x > mip_width, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(int64_t(p_destination_region.position.y) + p_destination_region.size.y > mip_height, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_image->get_width() != p_destination_region.size.x || p_image->get_height() != p_destination_region.size.y, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_image->get_format() != texture->format, ERR_INVALID_DATA);
+	ERR_FAIL_COND_V(texture->real_format != texture->format, ERR_UNAVAILABLE);
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return ERR_UNAVAILABLE;
+	}
+
+	const int bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	const int64_t expected_size = int64_t(p_destination_region.size.x) * p_destination_region.size.y * bytes_per_pixel;
+	const Vector<uint8_t> data = p_image->get_data();
+	ERR_FAIL_COND_V(data.size() != expected_size, ERR_INVALID_DATA);
+
+	GLint previous_active_texture = GL_TEXTURE0;
+	GLint previous_binding = 0;
+	GLint previous_unpack_alignment = 4;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_binding);
+	glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_unpack_alignment);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+
+	glBindTexture(GL_TEXTURE_2D, texture->tex_id);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexSubImage2D(GL_TEXTURE_2D, p_mipmap, p_destination_region.position.x, p_destination_region.position.y,
+			p_destination_region.size.x, p_destination_region.size.y, texture->gl_format_cache, texture->gl_type_cache, data.ptr());
+
+	glPixelStorei(GL_UNPACK_ALIGNMENT, previous_unpack_alignment);
+	glBindTexture(GL_TEXTURE_2D, previous_binding);
+	glActiveTexture(previous_active_texture);
+	const GLenum gl_error = glGetError();
+	ERR_FAIL_COND_V(gl_error != GL_NO_ERROR, ERR_CANT_CREATE);
+
+	texture->image_cache_2d.unref();
+	return OK;
+}
+
+Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer) const {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, Ref<Image>());
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != Texture::TYPE_2D || texture->target != GL_TEXTURE_2D || texture->is_proxy || texture->is_render_target, Ref<Image>());
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, Ref<Image>());
+	ERR_FAIL_COND_V(p_layer != 0, Ref<Image>());
+	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, Ref<Image>());
+	ERR_FAIL_COND_V(texture->real_format != texture->format, Ref<Image>());
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return Ref<Image>();
+	}
+
+	const int width = MAX(1, texture->width >> p_mipmap);
+	const int height = MAX(1, texture->height >> p_mipmap);
+	const int64_t data_size = int64_t(width) * height * Image::get_format_pixel_size(texture->format);
+	ERR_FAIL_COND_V(data_size <= 0 || data_size > INT32_MAX, Ref<Image>());
+	Vector<uint8_t> data;
+	data.resize(data_size);
+
+	GLint previous_framebuffer = 0;
+	GLint previous_active_texture = GL_TEXTURE0;
+	GLint previous_binding = 0;
+	GLint previous_pack_alignment = 4;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_binding);
+	glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+
+	GLuint framebuffer = 0;
+	glGenFramebuffers(1, &framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture->tex_id, p_mipmap);
+	const GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (framebuffer_status == GL_FRAMEBUFFER_COMPLETE) {
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, width, height, texture->gl_format_cache, texture->gl_type_cache, data.ptrw());
+	}
+
+	glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
+	glBindFramebuffer(GL_FRAMEBUFFER, previous_framebuffer);
+	glDeleteFramebuffers(1, &framebuffer);
+	glBindTexture(GL_TEXTURE_2D, previous_binding);
+	glActiveTexture(previous_active_texture);
+	const GLenum gl_error = glGetError();
+	ERR_FAIL_COND_V(framebuffer_status != GL_FRAMEBUFFER_COMPLETE || gl_error != GL_NO_ERROR, Ref<Image>());
+
+	return Image::create_from_data(width, height, false, texture->format, data);
+}
+
+uint64_t TextureStorage::texture_drawable_get_generation(RID p_texture) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	if (texture == nullptr || texture->is_proxy || texture->type != Texture::TYPE_2D) {
+		return 0;
+	}
+	return texture->drawable_generation;
 }
 
 void TextureStorage::texture_2d_placeholder_initialize(RID p_texture) {
@@ -1804,6 +1941,8 @@ Vector<Ref<Image>> TextureStorage::texture_3d_get(RID p_texture) const {
 
 void TextureStorage::texture_drawable_generate_mipmaps(RID p_texture) {
 	Texture *texture = get_texture(p_texture);
+	ERR_FAIL_NULL(texture);
+	ERR_FAIL_COND(texture->drawable_generation == 0 || texture->type != Texture::TYPE_2D || texture->target != GL_TEXTURE_2D || texture->is_proxy || texture->is_render_target);
 	Vector3i size = texture_get_size(p_texture);
 	CopyEffects::get_singleton()->bilinear_blur(texture->tex_id, texture->mipmaps, Rect2i(0, 0, size.x, size.y));
 }
@@ -1825,6 +1964,7 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 		return;
 	}
 
+	const uint64_t previous_generation = tex_to->drawable_generation;
 	if (tex_to->canvas_texture) {
 		memdelete(tex_to->canvas_texture);
 		tex_to->canvas_texture = nullptr;
@@ -1839,6 +1979,9 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 	Vector<RID> proxies_to_redirect = Vector<RID>(tex_from->proxies);
 
 	*tex_to = *tex_from;
+	if (previous_generation != 0 && tex_to->drawable_generation != 0) {
+		tex_to->drawable_generation = previous_generation == UINT64_MAX ? UINT64_MAX : previous_generation + 1;
+	}
 
 	tex_to->proxies = proxies_to_update; //restore proxies, so they can be updated
 

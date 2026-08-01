@@ -2274,6 +2274,9 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("texture_proxy_update", "texture", "proxy_to"), &RenderingServer::texture_proxy_update);
 
 	ClassDB::bind_method(D_METHOD("texture_drawable_blit_rect", "textures", "rect", "material", "modulate", "source_textures", "to_mipmap"), &RenderingServer::texture_drawable_blit_rect, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("texture_drawable_update_subresource", "texture", "image", "destination_region", "mipmap", "expected_generation", "layer"), &RenderingServer::texture_drawable_update_subresource, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("texture_drawable_get_subresource", "texture", "mipmap", "expected_generation", "layer"), &RenderingServer::texture_drawable_get_subresource, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("texture_drawable_get_generation", "texture"), &RenderingServer::texture_drawable_get_generation);
 
 	ClassDB::bind_method(D_METHOD("texture_2d_placeholder_create"), &RenderingServer::texture_2d_placeholder_create);
 	ClassDB::bind_method(D_METHOD("texture_2d_layered_placeholder_create", "layered_type"), &RenderingServer::texture_2d_layered_placeholder_create);
