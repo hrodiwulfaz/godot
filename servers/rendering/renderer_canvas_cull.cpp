@@ -1705,6 +1705,54 @@ void RendererCanvasCull::canvas_item_add_texture_rect_region(RID p_item, const R
 	}
 }
 
+void RendererCanvasCull::canvas_item_add_texture_page_rect_region(RID p_item, const Rect2 &p_rect, RID p_page_texture, const Rect2 &p_mapped_source, const Rect2 &p_sampler_domain, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, RID p_fallback_texture, const Rect2 &p_fallback_source, const Color &p_modulate, bool p_transpose, bool p_clip_uv) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	ERR_FAIL_COND_MSG((p_mapped_source.size.x < 0) != (p_fallback_source.size.x < 0) ||
+					(p_mapped_source.size.y < 0) != (p_fallback_source.size.y < 0),
+			"Mapped and fallback source rectangles must have matching directions.");
+
+	Item::CommandTexturePageRect *rect = canvas_item->alloc_command<Item::CommandTexturePageRect>();
+	ERR_FAIL_NULL(rect);
+	rect->modulate = p_modulate;
+	rect->rect = p_rect;
+	rect->texture = p_page_texture;
+	rect->source = p_mapped_source;
+	rect->sampler_domain = p_sampler_domain;
+	rect->array_layer = p_array_layer;
+	rect->max_region_lod = p_max_region_lod;
+	rect->expected_generation = p_expected_generation;
+	rect->fallback_texture = p_fallback_texture;
+	rect->fallback_source = p_fallback_source;
+	rect->flags = RendererCanvasRender::CANVAS_RECT_REGION | RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING;
+
+	if (p_rect.size.x < 0) {
+		rect->flags |= RendererCanvasRender::CANVAS_RECT_FLIP_H;
+		rect->rect.size.x = -rect->rect.size.x;
+	}
+	if (p_mapped_source.size.x < 0) {
+		rect->flags ^= RendererCanvasRender::CANVAS_RECT_FLIP_H;
+		rect->source.size.x = -rect->source.size.x;
+		rect->fallback_source.size.x = -rect->fallback_source.size.x;
+	}
+	if (p_rect.size.y < 0) {
+		rect->flags |= RendererCanvasRender::CANVAS_RECT_FLIP_V;
+		rect->rect.size.y = -rect->rect.size.y;
+	}
+	if (p_mapped_source.size.y < 0) {
+		rect->flags ^= RendererCanvasRender::CANVAS_RECT_FLIP_V;
+		rect->source.size.y = -rect->source.size.y;
+		rect->fallback_source.size.y = -rect->fallback_source.size.y;
+	}
+	if (p_transpose) {
+		rect->flags |= RendererCanvasRender::CANVAS_RECT_TRANSPOSE;
+		SWAP(rect->rect.size.x, rect->rect.size.y);
+	}
+	if (p_clip_uv) {
+		rect->flags |= RendererCanvasRender::CANVAS_RECT_CLIP_UV;
+	}
+}
+
 void RendererCanvasCull::canvas_item_add_nine_patch(RID p_item, const Rect2 &p_rect, const Rect2 &p_source, RID p_texture, const Vector2 &p_topleft, const Vector2 &p_bottomright, RSE::NinePatchAxisMode p_x_axis_mode, RSE::NinePatchAxisMode p_y_axis_mode, bool p_draw_center, const Color &p_modulate) {
 	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
 	ERR_FAIL_NULL(canvas_item);

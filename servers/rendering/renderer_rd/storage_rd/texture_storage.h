@@ -666,6 +666,11 @@ public:
 		return tex->layers;
 	}
 
+	_FORCE_INLINE_ int texture_get_mipmap_count(RID p_texture) {
+		RendererRD::TextureStorage::Texture *tex = texture_owner.get_or_null(p_texture);
+		return tex ? tex->mipmaps : 0;
+	}
+
 	_FORCE_INLINE_ Size2i texture_2d_get_size(RID p_texture) {
 		if (p_texture.is_null()) {
 			return Size2i();

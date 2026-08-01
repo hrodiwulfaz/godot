@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="CanvasTexturePageView" inherits="Texture2D" api_type="core" experimental="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		An immutable logical view into an isolated region of a drawable texture page.
+	</brief_description>
+	<description>
+		[CanvasTexturePageView] maps ordinary [Texture2D] drawing to one independently mipmapped region of a physical drawable page. Its logical dimensions are stored independently from an optional fallback. Direct RID and image access return the fallback, or an invalid RID and [code]null[/code] image when none is supplied, so unsupported consumers never bind the physical page as an ordinary logical texture.
+		Configure a new view before publishing it. Published views are immutable; replace the view held by an outer [AtlasTexture] when placement or generation changes.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="configure">
+			<return type="int" enum="Error" />
+			<param index="0" name="page_texture" type="Texture" />
+			<param index="1" name="physical_region" type="Rect2i" />
+			<param index="2" name="array_layer" type="int" />
+			<param index="3" name="max_region_lod" type="int" />
+			<param index="4" name="expected_generation" type="int" />
+			<param index="5" name="fallback_texture" type="Texture2D" default="null" />
+			<description>
+				Configures this view once. [param physical_region] defines the logical size and must fit the drawable page. Its position and size, and both page axes, must be aligned for every level through [param max_region_lod]. The requested LOD must exist in the page's actual mip chain, and [param expected_generation] must match the current drawable generation.
+				[param fallback_texture] is optional. A same-sized fallback preserves exact ordinary-texture access; a smaller shared transparent fallback is scaled to the logical source domain. Without a fallback, unsupported or stale draws remain transparent while preserving the logical layout.
+				This Pass-A resource accepts an ordinary [DrawableTexture2D] with [param array_layer] equal to [code]0[/code]. Unsupported or stale configurations return a non-[constant @GlobalScope.OK] result without changing the view.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="resource_local_to_scene" type="bool" setter="set_local_to_scene" getter="is_local_to_scene" overrides="Resource" default="false" />
+	</members>
+</class>

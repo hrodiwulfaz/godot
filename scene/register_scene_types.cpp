@@ -121,6 +121,7 @@
 #include "scene/resources/camera_attributes.h"
 #include "scene/resources/camera_texture.h"
 #include "scene/resources/canvas_item_material.h"
+#include "scene/resources/canvas_texture_page_view.h"
 #include "scene/resources/color_palette.h"
 #include "scene/resources/compositor.h"
 #include "scene/resources/compressed_texture.h"
@@ -953,6 +954,7 @@ void register_scene_types() {
 	GDREGISTER_CLASS(CameraTexture);
 	GDREGISTER_CLASS(ExternalTexture);
 	GDREGISTER_CLASS(DrawableTexture2D);
+	GDREGISTER_CLASS(CanvasTexturePageView);
 	GDREGISTER_VIRTUAL_CLASS(TextureLayered);
 	GDREGISTER_ABSTRACT_CLASS(ImageTextureLayered);
 	GDREGISTER_VIRTUAL_CLASS(Texture3D);
