@@ -15,6 +15,8 @@
 
 #define INSTANCE_FLAGS_SHADOW_MASKED_SHIFT 13 // 16 bits.
 #define INSTANCE_FLAGS_SHADOW_MASKED (1 << INSTANCE_FLAGS_SHADOW_MASKED_SHIFT)
+#define INSTANCE_FLAGS_USE_ARRAY_LAYER (1U << 29)
+#define INSTANCE_FLAGS_USE_REGION_SAMPLING (1U << 30)
 
 struct InstanceData {
 	vec2 world_x;
@@ -30,7 +32,8 @@ struct InstanceData {
 	vec4 ninepatch_margins;
 	vec4 dst_rect; //for built-in rect and UV
 	vec4 src_rect;
-	vec2 pad;
+	uint array_layer;
+	uint max_region_lod;
 
 #endif
 	uint flags;
@@ -52,7 +55,7 @@ layout(push_constant, std430) uniform Params {
 	uint sc_packed_0;
 	uint specular_shininess;
 	uint batch_flags;
-	uint pad0;
+	float region_mipmap_bias;
 
 	vec2 msdf;
 	vec2 color_texture_pixel_size;
@@ -101,6 +104,22 @@ bool sc_use_msdf() {
 
 bool sc_use_lcd() {
 	return ((sc_packed_0() >> 2) & 1U) != 0;
+}
+
+bool sc_use_texture_array() {
+	return ((sc_packed_0() >> 3) & 1U) != 0;
+}
+
+bool sc_use_region_sampling() {
+	return ((sc_packed_0() >> 4) & 1U) != 0;
+}
+
+bool sc_region_mip_nearest() {
+	return ((sc_packed_0() >> 5) & 1U) != 0;
+}
+
+bool sc_region_mip_trilinear() {
+	return ((sc_packed_0() >> 6) & 1U) != 0;
 }
 
 // In vulkan, sets should always be ordered using the following logic:
