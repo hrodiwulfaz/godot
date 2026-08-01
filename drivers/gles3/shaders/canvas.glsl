@@ -11,6 +11,11 @@ USE_NINEPATCH = false
 USE_PRIMITIVE = false
 USE_ATTRIBUTES = false
 USE_INSTANCING = false
+USE_PAGE_RECT = false
+USE_TEXTURE_ARRAY = false
+USE_REGION_SAMPLING = false
+REGION_MIP_NEAREST = false
+REGION_MIP_TRILINEAR = false
 
 #[vertex]
 
@@ -79,6 +84,8 @@ layout(location = 15) in highp uvec4 attrib_H;
 #define read_draw_data_ninepatch_margins attrib_D
 #define read_draw_data_dst_rect attrib_E
 #define read_draw_data_src_rect attrib_F
+#define read_draw_data_array_layer attrib_G.x
+#define read_draw_data_max_region_lod attrib_G.y
 
 #endif
 
@@ -101,6 +108,9 @@ flat out vec4 varying_E;
 #endif
 flat out uvec2 varying_F;
 flat out uvec4 varying_G;
+#ifdef USE_PAGE_RECT
+flat out highp uvec2 varying_H;
+#endif
 
 // This needs to be outside clang-format so the ubo comment is in the right place
 #ifdef MATERIAL_UNIFORMS_USED
@@ -144,6 +154,9 @@ void main() {
 
 	varying_F = uvec2(read_draw_data_flags, read_draw_data_instance_offset);
 	varying_G = read_draw_data_lights;
+#ifdef USE_PAGE_RECT
+	varying_H = uvec2(read_draw_data_array_layer, read_draw_data_max_region_lod);
+#endif
 
 	vec4 instance_custom = vec4(0.0);
 
@@ -325,6 +338,11 @@ flat in vec4 varying_E;
 
 flat in uvec2 varying_F;
 flat in uvec4 varying_G;
+#ifdef USE_PAGE_RECT
+flat in highp uvec2 varying_H;
+#define read_draw_data_array_layer varying_H.x
+#define read_draw_data_max_region_lod varying_H.y
+#endif
 #define read_draw_data_flags varying_F.x
 #define read_draw_data_instance_offset varying_F.y
 #define read_draw_data_lights varying_G
@@ -342,6 +360,7 @@ uniform sampler2D color_texture; //texunit:0
 
 uniform mediump uint batch_flags;
 uniform highp uint specular_shininess_in;
+uniform highp float region_mipmap_bias;
 
 layout(location = 0) out vec4 frag_color;
 
@@ -563,12 +582,43 @@ float msdf_median(float r, float g, float b) {
 	return max(min(r, g), min(max(r, g), b));
 }
 
+vec4 sample_isolated_page_2d(highp vec2 p_uv_unclamped, highp vec4 p_sampler_domain, highp uint p_max_region_lod) {
+	highp vec2 page_size = vec2(textureSize(color_texture, 0));
+	highp vec2 gradient_x = dFdx(p_uv_unclamped) * page_size;
+	highp vec2 gradient_y = dFdy(p_uv_unclamped) * page_size;
+	highp float lambda = 0.5 * log2(max(max(dot(gradient_x, gradient_x), dot(gradient_y, gradient_y)), 1e-8)) + region_mipmap_bias;
+	highp float lod = clamp(lambda, 0.0, float(p_max_region_lod));
+
+#ifdef REGION_MIP_NEAREST
+	highp float level = floor(lod + 0.5);
+	highp vec2 half_texel = vec2(0.5 * exp2(level)) / page_size;
+	highp vec2 sample_uv = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel, p_sampler_domain.xy + p_sampler_domain.zw - half_texel);
+	return textureLod(color_texture, sample_uv, level);
+#elif defined(REGION_MIP_TRILINEAR)
+	highp float level_0 = floor(lod);
+	highp float level_1 = min(level_0 + 1.0, float(p_max_region_lod));
+	highp vec2 half_texel_0 = vec2(0.5 * exp2(level_0)) / page_size;
+	highp vec2 half_texel_1 = vec2(0.5 * exp2(level_1)) / page_size;
+	highp vec2 sample_uv_0 = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel_0, p_sampler_domain.xy + p_sampler_domain.zw - half_texel_0);
+	highp vec2 sample_uv_1 = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel_1, p_sampler_domain.xy + p_sampler_domain.zw - half_texel_1);
+	highp vec4 sample_0 = textureLod(color_texture, sample_uv_0, level_0);
+	highp vec4 sample_1 = textureLod(color_texture, sample_uv_1, level_1);
+	return mix(sample_0, sample_1, fract(lod));
+#else
+	highp vec2 half_texel = vec2(0.5) / page_size;
+	highp vec2 sample_uv = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel, p_sampler_domain.xy + p_sampler_domain.zw - half_texel);
+	return textureLod(color_texture, sample_uv, 0.0);
+#endif
+}
+
 void main() {
 	vec4 color = color_interp;
 	vec2 uv = uv_interp;
 	vec2 vertex = vertex_interp;
 
-#if !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE)
+#ifdef USE_PAGE_RECT
+	vec4 region_rect = read_draw_data_ninepatch_margins;
+#elif !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE)
 	vec4 region_rect = read_draw_data_src_rect;
 #else
 	vec4 region_rect = vec4(0.0, 0.0, 1.0 / read_draw_data_color_texture_pixel_size);
@@ -624,7 +674,13 @@ void main() {
 		} else {
 			color = vec4(0.0, 0.0, 0.0, 0.0);
 		}
-	} else {
+	}
+#ifdef USE_PAGE_RECT
+	else if (bool(read_draw_data_flags & INSTANCE_FLAGS_USE_REGION_SAMPLING)) {
+		color *= sample_isolated_page_2d(uv, read_draw_data_ninepatch_margins, read_draw_data_max_region_lod);
+	}
+#endif
+	else {
 #else
 	{
 #endif

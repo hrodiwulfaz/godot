@@ -35,8 +35,10 @@ TEST_FORCE_LINK(test_drawable_texture_2d)
 #include "core/os/os.h"
 #include "core/os/thread.h"
 #include "core/templates/safe_refcount.h"
+#include "scene/resources/canvas_texture_page_view.h"
 #include "scene/resources/drawable_texture_2d.h"
 #include "scene/resources/image_texture.h"
+#include "servers/rendering/renderer_canvas_render.h"
 #include "servers/rendering/rendering_server.h"
 
 namespace TestDrawableTexture2D {
@@ -300,6 +302,149 @@ TEST_CASE("[SceneTree][DrawableTexture2D] proxy commands preserve base contract 
 	CHECK(RS::get_singleton()->texture_drawable_update_subresource(texture_rid, upload, Rect2i(0, 0, 2, 2), 1, generation, 0) == OK);
 	RS::get_singleton()->texture_drawable_generate_mipmaps(texture_rid);
 	CHECK(RS::get_singleton()->texture_drawable_get_subresource(texture_rid, 1, generation, 0).is_valid());
+}
+
+TEST_CASE("[SceneTree][CanvasTexturePageView] immutable logical adapter and fallback") {
+	Ref<DrawableTexture2D> page;
+	page.instantiate();
+	REQUIRE(page->setup_checked(8, 8, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == OK);
+	const uint64_t generation = RS::get_singleton()->texture_drawable_get_generation(page->get_rid());
+
+	Ref<Image> fallback_image = make_rgba8_image(Size2i(4, 4), 97);
+	Ref<ImageTexture> fallback = ImageTexture::create_from_image(fallback_image);
+	REQUIRE(fallback.is_valid());
+
+	Ref<CanvasTexturePageView> view;
+	view.instantiate();
+	REQUIRE(view->configure(page, Rect2i(4, 0, 4, 4), 0, 2, generation, fallback) == OK);
+	CHECK(view->get_width() == 4);
+	CHECK(view->get_height() == 4);
+	CHECK(view->get_mipmap_count() == 2);
+	CHECK(view->has_mipmaps());
+	CHECK(view->get_format() == Image::FORMAT_RGBA8);
+	CHECK(view->get_rid() == fallback->get_rid());
+	REQUIRE(view->get_image().is_valid());
+	CHECK(view->get_image()->get_data() == fallback_image->get_data());
+
+	Rect2 clipped_rect;
+	Rect2 clipped_source;
+	CHECK(view->get_rect_region(Rect2(0, 0, 40, 40), Rect2(-1, -1, 4, 4), clipped_rect, clipped_source));
+	CHECK(clipped_rect == Rect2(10, 10, 30, 30));
+	CHECK(clipped_source == Rect2(0, 0, 3, 3));
+
+	const RID canvas_item = RS::get_singleton()->canvas_item_create();
+	view->draw(canvas_item, Point2(3, 5));
+	view->draw_rect(canvas_item, Rect2(0, 0, 8, 8), false);
+	view->draw_rect(canvas_item, Rect2(0, 0, 8, 8), true);
+	view->draw_rect_region(canvas_item, Rect2(0, 0, 8, 8), Rect2(1, 1, 2, 2), Color(1, 1, 1, 1), false, false);
+	view->draw_rect_region(canvas_item, Rect2(0, 0, 8, 8), Rect2(1, 1, 2, 2), Color(1, 1, 1, 1), false, true);
+	RS::get_singleton()->free_rid(canvas_item);
+
+	ERR_PRINT_OFF;
+	CHECK(view->configure(page, Rect2i(0, 0, 4, 4), 0, 2, generation, fallback) == ERR_ALREADY_IN_USE);
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[SceneTree][CanvasTexturePageView] rejects invalid physical contracts") {
+	Ref<DrawableTexture2D> page;
+	page.instantiate();
+	REQUIRE(page->setup_checked(8, 8, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == OK);
+	const uint64_t generation = RS::get_singleton()->texture_drawable_get_generation(page->get_rid());
+	Ref<ImageTexture> fallback = ImageTexture::create_from_image(make_rgba8_image(Size2i(4, 4), 109));
+	Ref<ImageTexture> shared_fallback = ImageTexture::create_from_image(make_rgba8_image(Size2i(1, 1), 113));
+
+	ERR_PRINT_OFF;
+	Ref<CanvasTexturePageView> array_layer;
+	array_layer.instantiate();
+	CHECK(array_layer->configure(page, Rect2i(0, 0, 4, 4), 1, 2, generation, fallback) == ERR_INVALID_PARAMETER);
+
+	Ref<CanvasTexturePageView> misaligned;
+	misaligned.instantiate();
+	CHECK(misaligned->configure(page, Rect2i(2, 0, 4, 4), 0, 2, generation, fallback) == ERR_INVALID_PARAMETER);
+
+	Ref<CanvasTexturePageView> outside;
+	outside.instantiate();
+	CHECK(outside->configure(page, Rect2i(8, 0, 4, 4), 0, 2, generation, fallback) == ERR_INVALID_PARAMETER);
+
+	Ref<CanvasTexturePageView> stale;
+	stale.instantiate();
+	CHECK(stale->configure(page, Rect2i(0, 0, 4, 4), 0, 2, generation + 1, fallback) == ERR_INVALID_DATA);
+
+	Ref<CanvasTexturePageView> wrong_kind;
+	wrong_kind.instantiate();
+	CHECK(wrong_kind->configure(fallback, Rect2i(0, 0, 4, 4), 0, 2, generation, fallback) == ERR_UNAVAILABLE);
+
+	Ref<DrawableTexture2D> no_mips;
+	no_mips.instantiate();
+	REQUIRE(no_mips->setup_checked(8, 8, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), false) == OK);
+	Ref<CanvasTexturePageView> missing_mips;
+	missing_mips.instantiate();
+	CHECK(missing_mips->configure(no_mips, Rect2i(0, 0, 4, 4), 0, 2, RS::get_singleton()->texture_drawable_get_generation(no_mips->get_rid()), fallback) == ERR_INVALID_PARAMETER);
+
+	Ref<DrawableTexture2D> odd_page;
+	odd_page.instantiate();
+	REQUIRE(odd_page->setup_checked(9, 8, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == OK);
+	Ref<CanvasTexturePageView> non_divisible;
+	non_divisible.instantiate();
+	CHECK(non_divisible->configure(odd_page, Rect2i(0, 0, 4, 4), 0, 1, RS::get_singleton()->texture_drawable_get_generation(odd_page->get_rid()), fallback) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+
+	Ref<CanvasTexturePageView> shared;
+	shared.instantiate();
+	REQUIRE(shared->configure(page, Rect2i(0, 0, 4, 4), 0, 2, generation, shared_fallback) == OK);
+	CHECK(shared->get_size() == Size2(4, 4));
+	CHECK(shared->get_rid() == shared_fallback->get_rid());
+
+	Ref<CanvasTexturePageView> absent;
+	absent.instantiate();
+	REQUIRE(absent->configure(page, Rect2i(4, 0, 4, 4), 0, 2, generation, Ref<Texture2D>()) == OK);
+	CHECK(absent->get_size() == Size2(4, 4));
+	CHECK(absent->get_rid().is_null());
+	CHECK(absent->get_image().is_null());
+	CHECK(absent->has_alpha());
+	const RID canvas_item = RS::get_singleton()->canvas_item_create();
+	absent->draw(canvas_item, Point2());
+	RS::get_singleton()->free_rid(canvas_item);
+}
+
+TEST_CASE("[CanvasTexturePageView] page command geometry validation") {
+	static_assert(RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING == (1 << 9));
+	static_assert(RendererCanvasRender::CANVAS_RECT_ARRAY_LAYER == (1 << 10));
+
+	RendererCanvasRender::Item::CommandTexturePageRect command;
+	command.rect = Rect2(0, 0, 16, 16);
+	command.source = Rect2(4, 0, 4, 4);
+	command.sampler_domain = Rect2(4, 0, 4, 4);
+	command.fallback_source = Rect2();
+	command.expected_generation = 1;
+	command.max_region_lod = 2;
+	command.flags = RendererCanvasRender::CANVAS_RECT_REGION | RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING;
+	CHECK(command.is_geometry_valid(Size2i(8, 8), 4));
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 1));
+
+	command.source.position = Point2(7, 0);
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.source.position = Point2(4, 0);
+
+	command.sampler_domain.position = Point2(6, 0);
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.sampler_domain.position = Point2(4, 0);
+
+	command.max_region_lod = 3;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.max_region_lod = 2;
+
+	command.flags |= RendererCanvasRender::CANVAS_RECT_TILE;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.flags &= ~RendererCanvasRender::CANVAS_RECT_TILE;
+
+	command.max_region_lod = 1;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(9, 8), 4));
+
+	command.source = Rect2(3072, 3072, 1024, 1024);
+	command.sampler_domain = command.source;
+	command.max_region_lod = 10;
+	CHECK(command.is_geometry_valid(Size2i(4096, 4096), 13));
 }
 
 } // namespace TestDrawableTexture2D

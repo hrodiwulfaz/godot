@@ -49,6 +49,8 @@ public:
 		CANVAS_RECT_IS_GROUP = 64,
 		CANVAS_RECT_MSDF = 128,
 		CANVAS_RECT_LCD = 256,
+		CANVAS_RECT_REGION_SAMPLING = 512,
+		CANVAS_RECT_ARRAY_LAYER = 1024,
 	};
 
 	struct Light {
@@ -190,6 +192,7 @@ public:
 				TYPE_TRANSFORM,
 				TYPE_CLIP_IGNORE,
 				TYPE_ANIMATION_SLICE,
+				TYPE_TEXTURE_PAGE_RECT,
 			};
 
 			Command *next = nullptr;
@@ -212,6 +215,21 @@ public:
 				outline = 0;
 				px_range = 1;
 				type = TYPE_RECT;
+			}
+		};
+
+		struct CommandTexturePageRect : public CommandRect {
+			Rect2 sampler_domain;
+			uint32_t array_layer = 0;
+			uint32_t max_region_lod = 0;
+			uint64_t expected_generation = 0;
+			RID fallback_texture;
+			Rect2 fallback_source;
+
+			bool is_geometry_valid(const Size2i &p_page_size, int p_mipmap_count) const;
+
+			CommandTexturePageRect() {
+				type = TYPE_TEXTURE_PAGE_RECT;
 			}
 		};
 

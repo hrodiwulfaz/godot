@@ -418,6 +418,26 @@
 				Draws the specified region of a 2D textured rectangle on the [CanvasItem] pointed to by the [param item] [RID]. See also [method CanvasItem.draw_texture_rect_region] and [method Texture2D.draw_rect_region].
 			</description>
 		</method>
+		<method name="canvas_item_add_texture_page_rect_region">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="rect" type="Rect2" />
+			<param index="2" name="page_texture" type="RID" />
+			<param index="3" name="mapped_source" type="Rect2" />
+			<param index="4" name="sampler_domain" type="Rect2" />
+			<param index="5" name="array_layer" type="int" />
+			<param index="6" name="max_region_lod" type="int" />
+			<param index="7" name="expected_generation" type="int" />
+			<param index="8" name="fallback_texture" type="RID" />
+			<param index="9" name="fallback_source" type="Rect2" />
+			<param index="10" name="modulate" type="Color" />
+			<param index="11" name="transpose" type="bool" />
+			<param index="12" name="clip_uv" type="bool" />
+			<description>
+				Adds a rectangle command that samples [param mapped_source] only inside the complete [param sampler_domain], using explicit mip levels no greater than [param max_region_lod]. That LOD must exist in the page's actual mip chain, both page axes must be divisible by [code]1 &lt;&lt; max_region_lod[/code], and the renderer verifies the physical drawable generation and metadata before selecting this path.
+				Unsupported, malformed, or stale commands draw [param fallback_source] from the ordinary [param fallback_texture]. If that fallback is invalid, the draw remains transparent rather than substituting a white texture. Array layers are unsupported by the Pass-A renderer.
+			</description>
+		</method>
 		<method name="canvas_item_add_triangle_array">
 			<return type="void" />
 			<param index="0" name="item" type="RID" />

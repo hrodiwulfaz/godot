@@ -60,6 +60,9 @@ class RasterizerCanvasGLES3 : public RendererCanvasRender {
 		INSTANCE_FLAGS_NINEPATCH_V_MODE_SHIFT = 11,
 
 		INSTANCE_FLAGS_SHADOW_MASKED_SHIFT = 13, // 16 bits.
+
+		INSTANCE_FLAGS_USE_ARRAY_LAYER = (1U << 29),
+		INSTANCE_FLAGS_USE_REGION_SAMPLING = (1U << 30),
 	};
 
 	enum {
@@ -211,7 +214,8 @@ public:
 				};
 				float dst_rect[4];
 				float src_rect[4];
-				float pad[2];
+				uint32_t array_layer;
+				uint32_t max_region_lod;
 			};
 			//primitive
 			struct {
@@ -226,6 +230,10 @@ public:
 	};
 
 	static_assert(sizeof(InstanceData) == 128, "2D instance data struct size must be 128 bytes");
+	static_assert(offsetof(InstanceData, array_layer) == 96, "2D instance array layer must remain at byte 96");
+	static_assert(offsetof(InstanceData, max_region_lod) == 100, "2D instance maximum region LOD must remain at byte 100");
+	static_assert(offsetof(InstanceData, flags) == 104, "2D instance flags must remain at byte 104");
+	static_assert(offsetof(InstanceData, instance_uniforms_ofs) == 108, "2D instance uniform offset must remain at byte 108");
 
 	struct Data {
 		GLuint canvas_quad_vertices;
@@ -327,6 +335,8 @@ public:
 	RID default_canvas_group_shader;
 	RID default_clip_children_material;
 	RID default_clip_children_shader;
+	bool use_nearest_mipmap_filter = false;
+	float region_mipmap_bias = 0.0f;
 
 	typedef void Texture;
 

@@ -1729,6 +1729,8 @@ void RendererCanvasRenderRD::update() {
 RendererCanvasRenderRD::RendererCanvasRenderRD() {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	use_nearest_mipmap_filter = GLOBAL_GET("rendering/textures/default_filters/use_nearest_mipmap_filter");
+	region_mipmap_bias = CLAMP(float(GLOBAL_GET("rendering/textures/default_filters/texture_mipmap_bias")), -2.0f, 2.0f);
 
 	{ //create default samplers
 
@@ -1751,6 +1753,7 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 		for (uint32_t ubershader = 0; ubershader < ubershader_iterations; ubershader++) {
 			const String base_define = ubershader ? "\n#define UBERSHADER\n" : "";
 			variants.push_back(base_define + ""); // SHADER_VARIANT_QUAD
+			variants.push_back(base_define + "#define USE_PAGE_RECT\n"); // SHADER_VARIANT_QUAD_PAGE
 			variants.push_back(base_define + "#define USE_NINEPATCH\n"); // SHADER_VARIANT_NINEPATCH
 			variants.push_back(base_define + "#define USE_PRIMITIVE\n"); // SHADER_VARIANT_PRIMITIVE
 			variants.push_back(base_define + "#define USE_PRIMITIVE\n#define USE_POINT_SIZE\n"); // SHADER_VARIANT_PRIMITIVE_POINTS
@@ -2405,6 +2408,159 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 		}
 
 		switch (c->type) {
+			case Item::Command::TYPE_TEXTURE_PAGE_RECT: {
+				const Item::CommandTexturePageRect *rect = static_cast<const Item::CommandTexturePageRect *>(c);
+				RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+
+				const bool page_owned = texture_storage->owns_texture(rect->texture);
+				const Size2i page_size = page_owned ? texture_storage->texture_2d_get_size(rect->texture) : Size2i();
+				const int page_mipmap_count = page_owned ? texture_storage->texture_get_mipmap_count(rect->texture) : 0;
+				const bool page_kind_valid = page_owned && texture_storage->texture_get_type(rect->texture) == RendererRD::TextureStorage::TYPE_2D;
+				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid(page_size, page_mipmap_count);
+				const bool page_generation_valid = page_owned &&
+						texture_storage->texture_drawable_get_generation(rect->texture) == rect->expected_generation;
+				const bool anisotropic_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC ||
+						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
+				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
+				const bool use_page = page_geometry_valid &&
+						page_generation_valid &&
+						!array_requested &&
+						r_current_batch->material.is_null() &&
+						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
+						!anisotropic_filter &&
+						!bool(rect->flags & CANVAS_RECT_CLIP_UV);
+
+				if (page_owned && !page_geometry_valid) {
+					ERR_PRINT_ONCE("CanvasTexturePageView physical metadata is malformed. Drawing its ordinary fallback.");
+				}
+
+				const RID texture = use_page ? rect->texture : rect->fallback_texture;
+				const Rect2 source = use_page ? rect->source : rect->fallback_source;
+				if (!use_page) {
+					const bool fallback_owned = texture_storage->owns_texture(texture);
+					const Size2i fallback_size = fallback_owned ? texture_storage->texture_2d_get_size(texture) : Size2i();
+					const bool fallback_valid = fallback_owned &&
+							texture_storage->texture_get_type(texture) == RendererRD::TextureStorage::TYPE_2D &&
+							source.is_finite() &&
+							source.size.x > 0 &&
+							source.size.y > 0 &&
+							Rect2(Vector2(), fallback_size).encloses(source);
+					if (!fallback_valid) {
+						break;
+					}
+				}
+
+				const Item::Command::Type command_type = use_page ? Item::Command::TYPE_TEXTURE_PAGE_RECT : Item::Command::TYPE_RECT;
+				const ShaderVariant shader_variant = use_page ? SHADER_VARIANT_QUAD_PAGE : SHADER_VARIANT_QUAD;
+				if (r_current_batch->command_type != command_type) {
+					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->command_type = command_type;
+					r_current_batch->command = c;
+					r_current_batch->shader_variant = shader_variant;
+					r_current_batch->render_primitive = RD::RENDER_PRIMITIVE_TRIANGLES;
+					r_current_batch->flags = 0;
+				}
+
+				Color modulated = rect->modulate * base_color;
+				if (use_linear_colors) {
+					modulated = modulated.srgb_to_linear();
+				}
+
+				if (r_current_batch->has_blend) {
+					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->has_blend = false;
+					r_current_batch->shader_variant = shader_variant;
+					r_current_batch->render_primitive = RD::RENDER_PRIMITIVE_TRIANGLES;
+				}
+
+				TextureState tex_state(texture, texture_filter, texture_repeat, false, use_linear_colors);
+				TextureInfo *tex_info = texture_info_map.getptr(tex_state);
+				if (!tex_info) {
+					tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
+					_prepare_batch_texture_info(texture, tex_state, tex_info);
+				}
+
+				if (r_current_batch->use_msdf || r_current_batch->use_lcd) {
+					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->use_msdf = false;
+					r_current_batch->use_lcd = false;
+				}
+
+				const bool mipmapped_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS ||
+						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS;
+				const bool region_mip_nearest = use_page && mipmapped_filter && use_nearest_mipmap_filter;
+				const bool region_mip_trilinear = use_page && mipmapped_filter && !use_nearest_mipmap_filter;
+				const float batch_region_mipmap_bias = use_page ? region_mipmap_bias : 0.0f;
+				if (r_current_batch->use_region_sampling != use_page ||
+						r_current_batch->region_mip_nearest != region_mip_nearest ||
+						r_current_batch->region_mip_trilinear != region_mip_trilinear ||
+						r_current_batch->region_mipmap_bias != batch_region_mipmap_bias) {
+					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->use_region_sampling = use_page;
+					r_current_batch->region_mip_nearest = region_mip_nearest;
+					r_current_batch->region_mip_trilinear = region_mip_trilinear;
+					r_current_batch->region_mipmap_bias = batch_region_mipmap_bias;
+				}
+
+				if (r_current_batch->tex_info != tex_info) {
+					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->tex_info = tex_info;
+				}
+
+				InstanceData *instance_data = new_instance_data(*r_current_batch, template_instance);
+				Rect2 src_rect(source.position * tex_info->texpixel_size, source.size * tex_info->texpixel_size);
+				Rect2 dst_rect(rect->rect.position, rect->rect.size);
+
+				if (dst_rect.size.width < 0) {
+					dst_rect.position.x += dst_rect.size.width;
+					dst_rect.size.width *= -1;
+				}
+				if (dst_rect.size.height < 0) {
+					dst_rect.position.y += dst_rect.size.height;
+					dst_rect.size.height *= -1;
+				}
+				if (rect->flags & CANVAS_RECT_FLIP_H) {
+					src_rect.size.x *= -1;
+				}
+				if (rect->flags & CANVAS_RECT_FLIP_V) {
+					src_rect.size.y *= -1;
+				}
+				if (rect->flags & CANVAS_RECT_TRANSPOSE) {
+					instance_data->flags |= INSTANCE_FLAGS_TRANSPOSE_RECT;
+				}
+				if (!use_page && (rect->flags & CANVAS_RECT_CLIP_UV)) {
+					instance_data->flags |= INSTANCE_FLAGS_CLIP_RECT_UV;
+				}
+
+				instance_data->modulation[0] = modulated.r;
+				instance_data->modulation[1] = modulated.g;
+				instance_data->modulation[2] = modulated.b;
+				instance_data->modulation[3] = modulated.a;
+
+				instance_data->src_rect[0] = src_rect.position.x;
+				instance_data->src_rect[1] = src_rect.position.y;
+				instance_data->src_rect[2] = src_rect.size.width;
+				instance_data->src_rect[3] = src_rect.size.height;
+
+				instance_data->dst_rect[0] = dst_rect.position.x;
+				instance_data->dst_rect[1] = dst_rect.position.y;
+				instance_data->dst_rect[2] = dst_rect.size.width;
+				instance_data->dst_rect[3] = dst_rect.size.height;
+
+				if (use_page) {
+					const Rect2 sampler_domain(rect->sampler_domain.position * tex_info->texpixel_size, rect->sampler_domain.size * tex_info->texpixel_size);
+					instance_data->ninepatch_margins[0] = sampler_domain.position.x;
+					instance_data->ninepatch_margins[1] = sampler_domain.position.y;
+					instance_data->ninepatch_margins[2] = sampler_domain.size.x;
+					instance_data->ninepatch_margins[3] = sampler_domain.size.y;
+					instance_data->array_layer = rect->array_layer;
+					instance_data->max_region_lod = rect->max_region_lod;
+					instance_data->flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
+				}
+
+				_add_to_batch(r_batch_broken, r_current_batch);
+			} break;
+
 			case Item::Command::TYPE_RECT: {
 				const Item::CommandRect *rect = static_cast<const Item::CommandRect *>(c);
 
@@ -3054,10 +3210,15 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	pipeline_key.shader_specialization.use_lighting = p_batch->use_lighting;
 	pipeline_key.shader_specialization.use_msdf = p_batch->use_msdf;
 	pipeline_key.shader_specialization.use_lcd = p_batch->use_lcd;
+	const bool is_page_batch = p_batch->command_type == Item::Command::TYPE_TEXTURE_PAGE_RECT;
+	pipeline_key.shader_specialization.use_region_sampling = is_page_batch && p_batch->use_region_sampling;
+	pipeline_key.shader_specialization.region_mip_nearest = is_page_batch && p_batch->region_mip_nearest;
+	pipeline_key.shader_specialization.region_mip_trilinear = is_page_batch && p_batch->region_mip_trilinear;
 	pipeline_key.lcd_blend = p_batch->has_blend;
 
 	switch (p_batch->command_type) {
 		case Item::Command::TYPE_RECT:
+		case Item::Command::TYPE_TEXTURE_PAGE_RECT:
 		case Item::Command::TYPE_NINEPATCH: {
 			PushConstant push_constant = p_batch->push_constant();
 
@@ -3290,6 +3451,7 @@ RendererCanvasRenderRD::Batch *RendererCanvasRenderRD::_new_batch(bool &r_batch_
 
 void RendererCanvasRenderRD::_add_to_batch(bool &r_batch_broken, Batch *&r_current_batch) {
 	DEV_ASSERT(r_current_batch->command_type == Item::Command::TYPE_RECT ||
+			r_current_batch->command_type == Item::Command::TYPE_TEXTURE_PAGE_RECT ||
 			r_current_batch->command_type == Item::Command::TYPE_NINEPATCH ||
 			r_current_batch->command_type == Item::Command::TYPE_PRIMITIVE);
 	r_current_batch->instance_count++;

@@ -33,7 +33,11 @@ layout(location = 2) out flat vec4 varying_A;
 layout(location = 3) out flat uvec4 varying_B;
 layout(location = 4) out flat uvec4 varying_C;
 
-#ifdef USE_NINEPATCH
+#ifdef USE_PAGE_RECT
+layout(location = 5) out flat vec4 varying_D;
+layout(location = 6) out flat vec4 varying_E;
+layout(location = 7) out flat uvec2 varying_F;
+#elif defined(USE_NINEPATCH)
 layout(location = 5) out flat vec4 varying_D;
 layout(location = 6) out flat vec4 varying_E;
 layout(location = 7) out flat vec4 varying_F;
@@ -95,6 +99,8 @@ layout(location = 15) in uvec4 attrib_H;
 #define read_draw_data_ninepatch_margins attrib_D
 #define read_draw_data_dst_rect attrib_E
 #define read_draw_data_src_rect attrib_F
+#define read_draw_data_array_layer attrib_G.x
+#define read_draw_data_max_region_lod attrib_G.y
 
 #endif // USE_PRIMITIVE
 
@@ -129,7 +135,11 @@ void main() {
 	varying_B = uvec4(read_draw_data_flags, read_draw_data_instance_offset, packHalf2x16(read_draw_data_src_rect.xy), packHalf2x16(read_draw_data_src_rect.zw));
 #endif
 	varying_C = read_draw_data_lights;
-#ifdef USE_NINEPATCH
+#ifdef USE_PAGE_RECT
+	varying_D = read_draw_data_src_rect;
+	varying_E = read_draw_data_ninepatch_margins;
+	varying_F = uvec2(read_draw_data_array_layer, read_draw_data_max_region_lod);
+#elif defined(USE_NINEPATCH)
 	varying_D = read_draw_data_ninepatch_margins;
 	varying_E = vec4(read_draw_data_dst_rect.z, read_draw_data_dst_rect.w, read_draw_data_ninepatch_pixel_size.x, read_draw_data_ninepatch_pixel_size.y);
 	varying_F = read_draw_data_src_rect;
@@ -338,7 +348,15 @@ layout(location = 4) in flat uvec4 varying_C;
 #define read_draw_data_src_rect (varying_B.zw)
 #define read_draw_data_lights varying_C
 
-#ifdef USE_NINEPATCH
+#ifdef USE_PAGE_RECT
+layout(location = 5) in flat vec4 varying_D;
+layout(location = 6) in flat vec4 varying_E;
+layout(location = 7) in flat uvec2 varying_F;
+#define read_draw_data_page_source varying_D
+#define read_draw_data_sampler_domain varying_E
+#define read_draw_data_array_layer varying_F.x
+#define read_draw_data_max_region_lod varying_F.y
+#elif defined(USE_NINEPATCH)
 layout(location = 5) in flat vec4 varying_D;
 layout(location = 6) in flat vec4 varying_E;
 layout(location = 7) in flat vec4 varying_F;
@@ -566,12 +584,45 @@ float msdf_median(float r, float g, float b) {
 	return max(min(r, g), min(max(r, g), b));
 }
 
+vec4 sample_isolated_page_2d(vec2 p_uv_unclamped, vec4 p_sampler_domain, uint p_max_region_lod) {
+	vec2 page_size = vec2(textureSize(sampler2D(color_texture, texture_sampler), 0));
+	vec2 gradient_x = dFdx(p_uv_unclamped) * page_size;
+	vec2 gradient_y = dFdy(p_uv_unclamped) * page_size;
+	float lambda = 0.5 * log2(max(max(dot(gradient_x, gradient_x), dot(gradient_y, gradient_y)), 1e-8)) + params.region_mipmap_bias;
+	float lod = clamp(lambda, 0.0, float(p_max_region_lod));
+
+	if (sc_region_mip_nearest()) {
+		float level = floor(lod + 0.5);
+		vec2 half_texel = vec2(0.5 * exp2(level)) / page_size;
+		vec2 sample_uv = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel, p_sampler_domain.xy + p_sampler_domain.zw - half_texel);
+		return textureLod(sampler2D(color_texture, texture_sampler), sample_uv, level);
+	}
+	if (sc_region_mip_trilinear()) {
+		float level_0 = floor(lod);
+		float level_1 = min(level_0 + 1.0, float(p_max_region_lod));
+		vec2 half_texel_0 = vec2(0.5 * exp2(level_0)) / page_size;
+		vec2 half_texel_1 = vec2(0.5 * exp2(level_1)) / page_size;
+		vec2 sample_uv_0 = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel_0, p_sampler_domain.xy + p_sampler_domain.zw - half_texel_0);
+		vec2 sample_uv_1 = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel_1, p_sampler_domain.xy + p_sampler_domain.zw - half_texel_1);
+		vec4 sample_0 = textureLod(sampler2D(color_texture, texture_sampler), sample_uv_0, level_0);
+		vec4 sample_1 = textureLod(sampler2D(color_texture, texture_sampler), sample_uv_1, level_1);
+		return mix(sample_0, sample_1, fract(lod));
+	}
+
+	vec2 half_texel = vec2(0.5) / page_size;
+	vec2 sample_uv = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel, p_sampler_domain.xy + p_sampler_domain.zw - half_texel);
+	return textureLod(sampler2D(color_texture, texture_sampler), sample_uv, 0.0);
+}
+
 void main() {
 	vec4 color = color_interp;
 	vec2 uv = uv_vertex_interp.xy;
 	vec2 vertex = uv_vertex_interp.zw;
 
-#if !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE)
+#ifdef USE_PAGE_RECT
+	vec4 src_rect = read_draw_data_page_source;
+	vec4 region_rect = read_draw_data_sampler_domain;
+#elif !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE)
 	vec4 src_rect = vec4(unpackHalf2x16(read_draw_data_src_rect.x), unpackHalf2x16(read_draw_data_src_rect.y));
 	vec4 region_rect = src_rect;
 #else
@@ -631,7 +682,13 @@ void main() {
 		} else {
 			color = vec4(0.0, 0.0, 0.0, 0.0);
 		}
-	} else {
+	}
+#ifdef USE_PAGE_RECT
+	else if (sc_use_region_sampling() && bool(read_draw_data_flags & INSTANCE_FLAGS_USE_REGION_SAMPLING)) {
+		color *= sample_isolated_page_2d(uv, read_draw_data_sampler_domain, read_draw_data_max_region_lod);
+	}
+#endif
+	else {
 #else
 	{
 #endif

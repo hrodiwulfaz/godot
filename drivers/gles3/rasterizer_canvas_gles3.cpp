@@ -726,6 +726,7 @@ void RasterizerCanvasGLES3::_render_items(RID p_to_render_target, int p_item_cou
 		// Bind per-batch uniforms.
 		material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::BATCH_FLAGS, state.canvas_instance_batches[i].flags, shader_version, variant, specialization);
 		material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::SPECULAR_SHININESS_IN, state.canvas_instance_batches[i].specular_shininess, shader_version, variant, specialization);
+		material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::REGION_MIPMAP_BIAS, region_mipmap_bias, shader_version, variant, specialization);
 
 		GLES3::CanvasShaderData::BlendMode blend_mode = state.canvas_instance_batches[i].blend_mode;
 		Color blend_color = state.canvas_instance_batches[i].blend_color;
@@ -813,7 +814,9 @@ void RasterizerCanvasGLES3::_render_items(RID p_to_render_target, int p_item_cou
 
 void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_render_target, const Transform2D &p_canvas_transform_inverse, Item *&current_clip, GLES3::CanvasShaderData::BlendMode p_blend_mode, Light *p_lights, uint32_t &r_index, bool &r_batch_broken, bool &r_sdf_used, const Point2 &p_repeat_offset) {
 	RSE::CanvasItemTextureFilter texture_filter = p_item->texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_DEFAULT ? state.default_filter : p_item->texture_filter;
-	const uint64_t specialization_command_mask = ~(CanvasShaderGLES3::USE_NINEPATCH | CanvasShaderGLES3::USE_PRIMITIVE | CanvasShaderGLES3::USE_ATTRIBUTES | CanvasShaderGLES3::USE_INSTANCING);
+	const uint64_t specialization_command_mask = ~(CanvasShaderGLES3::USE_NINEPATCH | CanvasShaderGLES3::USE_PRIMITIVE | CanvasShaderGLES3::USE_ATTRIBUTES | CanvasShaderGLES3::USE_INSTANCING |
+			CanvasShaderGLES3::USE_PAGE_RECT | CanvasShaderGLES3::USE_TEXTURE_ARRAY | CanvasShaderGLES3::USE_REGION_SAMPLING |
+			CanvasShaderGLES3::REGION_MIP_NEAREST | CanvasShaderGLES3::REGION_MIP_TRILINEAR);
 
 	if (texture_filter != state.canvas_instance_batches[state.current_batch_index].filter) {
 		_new_batch(r_batch_broken);
@@ -898,6 +901,8 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 		}
 		state.instance_data_array[r_index].color_texture_pixel_size[0] = 0.0;
 		state.instance_data_array[r_index].color_texture_pixel_size[1] = 0.0;
+		state.instance_data_array[r_index].array_layer = 0;
+		state.instance_data_array[r_index].max_region_lod = 0;
 
 		state.instance_data_array[r_index].lights[0] = lights[0];
 		state.instance_data_array[r_index].lights[1] = lights[1];
@@ -933,6 +938,129 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 		}
 
 		switch (c->type) {
+			case Item::Command::TYPE_TEXTURE_PAGE_RECT: {
+				const Item::CommandTexturePageRect *rect = static_cast<const Item::CommandTexturePageRect *>(c);
+				GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
+				GLES3::Texture *page_texture = texture_storage->get_texture(rect->texture);
+
+				const Size2i page_size = page_texture ? Size2i(page_texture->width, page_texture->height) : Size2i();
+				const bool page_kind_valid = page_texture && page_texture->type == GLES3::Texture::TYPE_2D;
+				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid(page_size, page_texture->mipmaps);
+				const bool page_generation_valid = page_texture &&
+						texture_storage->texture_drawable_get_generation(rect->texture) == rect->expected_generation;
+				const bool anisotropic_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC ||
+						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
+				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
+				const bool use_page = page_geometry_valid &&
+						page_generation_valid &&
+						!array_requested &&
+						state.canvas_instance_batches[state.current_batch_index].material.is_null() &&
+						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
+						!anisotropic_filter &&
+						!bool(rect->flags & CANVAS_RECT_CLIP_UV);
+
+				if (page_texture && !page_geometry_valid) {
+					ERR_PRINT_ONCE("CanvasTexturePageView physical metadata is malformed. Drawing its ordinary fallback.");
+				}
+
+				const RID texture = use_page ? rect->texture : rect->fallback_texture;
+				const Rect2 source = use_page ? rect->source : rect->fallback_source;
+				if (!use_page) {
+					GLES3::Texture *fallback_texture = texture_storage->get_texture(texture);
+					const Size2i fallback_size = fallback_texture ? Size2i(fallback_texture->width, fallback_texture->height) : Size2i();
+					const bool fallback_valid = fallback_texture &&
+							fallback_texture->type == GLES3::Texture::TYPE_2D &&
+							source.is_finite() &&
+							source.size.x > 0 &&
+							source.size.y > 0 &&
+							Rect2(Vector2(), fallback_size).encloses(source);
+					if (!fallback_valid) {
+						break;
+					}
+				}
+
+				const Item::Command::Type command_type = use_page ? Item::Command::TYPE_TEXTURE_PAGE_RECT : Item::Command::TYPE_RECT;
+				const bool mipmapped_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS ||
+						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS;
+				uint64_t page_specialization = 0;
+				if (use_page) {
+					page_specialization = CanvasShaderGLES3::USE_PAGE_RECT | CanvasShaderGLES3::USE_REGION_SAMPLING;
+					if (mipmapped_filter) {
+						page_specialization |= use_nearest_mipmap_filter ? CanvasShaderGLES3::REGION_MIP_NEAREST : CanvasShaderGLES3::REGION_MIP_TRILINEAR;
+					}
+				}
+				const uint64_t page_specialization_mask = CanvasShaderGLES3::USE_PAGE_RECT | CanvasShaderGLES3::USE_TEXTURE_ARRAY |
+						CanvasShaderGLES3::USE_REGION_SAMPLING | CanvasShaderGLES3::REGION_MIP_NEAREST | CanvasShaderGLES3::REGION_MIP_TRILINEAR;
+
+				if (texture != state.canvas_instance_batches[state.current_batch_index].tex ||
+						state.canvas_instance_batches[state.current_batch_index].command_type != command_type) {
+					_new_batch(r_batch_broken);
+					state.canvas_instance_batches[state.current_batch_index].tex = texture;
+					state.canvas_instance_batches[state.current_batch_index].command_type = command_type;
+					state.canvas_instance_batches[state.current_batch_index].command = c;
+					state.canvas_instance_batches[state.current_batch_index].specialization &= specialization_command_mask;
+					state.canvas_instance_batches[state.current_batch_index].specialization |= page_specialization;
+					state.canvas_instance_batches[state.current_batch_index].flags = 0;
+				} else if ((state.canvas_instance_batches[state.current_batch_index].specialization & page_specialization_mask) != page_specialization) {
+					_new_batch(r_batch_broken);
+					state.canvas_instance_batches[state.current_batch_index].specialization &= ~page_specialization_mask;
+					state.canvas_instance_batches[state.current_batch_index].specialization |= page_specialization;
+				}
+
+				_prepare_canvas_texture(texture, state.canvas_instance_batches[state.current_batch_index].filter, state.canvas_instance_batches[state.current_batch_index].repeat, r_index, texpixel_size);
+
+				Rect2 src_rect(source.position * texpixel_size, source.size * texpixel_size);
+				Rect2 dst_rect(rect->rect.position, rect->rect.size);
+				if (dst_rect.size.width < 0) {
+					dst_rect.position.x += dst_rect.size.width;
+					dst_rect.size.width *= -1;
+				}
+				if (dst_rect.size.height < 0) {
+					dst_rect.position.y += dst_rect.size.height;
+					dst_rect.size.height *= -1;
+				}
+				if (rect->flags & CANVAS_RECT_FLIP_H) {
+					src_rect.size.x *= -1;
+				}
+				if (rect->flags & CANVAS_RECT_FLIP_V) {
+					src_rect.size.y *= -1;
+				}
+				if (rect->flags & CANVAS_RECT_TRANSPOSE) {
+					state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_TRANSPOSE_RECT;
+				}
+				if (!use_page && (rect->flags & CANVAS_RECT_CLIP_UV)) {
+					state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_CLIP_RECT_UV;
+				}
+
+				state.instance_data_array[r_index].modulation[0] = rect->modulate.r * base_color.r;
+				state.instance_data_array[r_index].modulation[1] = rect->modulate.g * base_color.g;
+				state.instance_data_array[r_index].modulation[2] = rect->modulate.b * base_color.b;
+				state.instance_data_array[r_index].modulation[3] = rect->modulate.a * base_color.a;
+
+				state.instance_data_array[r_index].src_rect[0] = src_rect.position.x;
+				state.instance_data_array[r_index].src_rect[1] = src_rect.position.y;
+				state.instance_data_array[r_index].src_rect[2] = src_rect.size.width;
+				state.instance_data_array[r_index].src_rect[3] = src_rect.size.height;
+
+				state.instance_data_array[r_index].dst_rect[0] = dst_rect.position.x;
+				state.instance_data_array[r_index].dst_rect[1] = dst_rect.position.y;
+				state.instance_data_array[r_index].dst_rect[2] = dst_rect.size.width;
+				state.instance_data_array[r_index].dst_rect[3] = dst_rect.size.height;
+
+				if (use_page) {
+					const Rect2 sampler_domain(rect->sampler_domain.position * texpixel_size, rect->sampler_domain.size * texpixel_size);
+					state.instance_data_array[r_index].ninepatch_margins[0] = sampler_domain.position.x;
+					state.instance_data_array[r_index].ninepatch_margins[1] = sampler_domain.position.y;
+					state.instance_data_array[r_index].ninepatch_margins[2] = sampler_domain.size.x;
+					state.instance_data_array[r_index].ninepatch_margins[3] = sampler_domain.size.y;
+					state.instance_data_array[r_index].array_layer = rect->array_layer;
+					state.instance_data_array[r_index].max_region_lod = rect->max_region_lod;
+					state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
+				}
+
+				_add_to_batch(r_index, r_batch_broken);
+			} break;
+
 			case Item::Command::TYPE_RECT: {
 				const Item::CommandRect *rect = static_cast<const Item::CommandRect *>(c);
 				if (rect->texture != state.canvas_instance_batches[state.current_batch_index].tex || state.canvas_instance_batches[state.current_batch_index].command_type != Item::Command::TYPE_RECT) {
@@ -1306,6 +1434,7 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 
 	switch (state.canvas_instance_batches[p_index].command_type) {
 		case Item::Command::TYPE_RECT:
+		case Item::Command::TYPE_TEXTURE_PAGE_RECT:
 		case Item::Command::TYPE_NINEPATCH: {
 			glBindVertexArray(data.indexed_quad_array);
 			glBindBuffer(GL_ARRAY_BUFFER, state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index]);
@@ -2649,6 +2778,8 @@ RasterizerCanvasGLES3::RasterizerCanvasGLES3() {
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	GLES3::MaterialStorage *material_storage = GLES3::MaterialStorage::get_singleton();
 	GLES3::Config *config = GLES3::Config::get_singleton();
+	use_nearest_mipmap_filter = GLOBAL_GET("rendering/textures/default_filters/use_nearest_mipmap_filter");
+	region_mipmap_bias = CLAMP(float(GLOBAL_GET("rendering/textures/default_filters/texture_mipmap_bias")), -2.0f, 2.0f);
 
 	glVertexAttrib4f(RSE::ARRAY_COLOR, 1.0, 1.0, 1.0, 1.0);
 

@@ -34,6 +34,47 @@
 
 RendererCanvasRender *RendererCanvasRender::singleton = nullptr;
 
+bool RendererCanvasRender::Item::CommandTexturePageRect::is_geometry_valid(const Size2i &p_page_size, int p_mipmap_count) const {
+	const uint16_t required_flags = CANVAS_RECT_REGION | CANVAS_RECT_REGION_SAMPLING;
+	const uint16_t incompatible_flags = CANVAS_RECT_TILE | CANVAS_RECT_MSDF | CANVAS_RECT_LCD | CANVAS_RECT_IS_GROUP;
+	if ((flags & required_flags) != required_flags || (flags & incompatible_flags) != 0) {
+		return false;
+	}
+	if (expected_generation == 0 || p_page_size.x <= 0 || p_page_size.y <= 0 || p_mipmap_count <= 0) {
+		return false;
+	}
+	if (!rect.is_finite() || !source.is_finite() || !sampler_domain.is_finite()) {
+		return false;
+	}
+	if (rect.size.x < 0 || rect.size.y < 0 || source.size.x <= 0 || source.size.y <= 0 || sampler_domain.size.x <= 0 || sampler_domain.size.y <= 0) {
+		return false;
+	}
+	if (!sampler_domain.encloses(source) || !Rect2(Vector2(), p_page_size).encloses(sampler_domain)) {
+		return false;
+	}
+	if (sampler_domain.position.x != Math::floor(sampler_domain.position.x) ||
+			sampler_domain.position.y != Math::floor(sampler_domain.position.y) ||
+			sampler_domain.size.x != Math::floor(sampler_domain.size.x) ||
+			sampler_domain.size.y != Math::floor(sampler_domain.size.y)) {
+		return false;
+	}
+	if (max_region_lod > 30 || max_region_lod >= uint32_t(p_mipmap_count)) {
+		return false;
+	}
+	const uint32_t alignment = 1U << max_region_lod;
+	if (uint32_t(p_page_size.x) % alignment != 0 || uint32_t(p_page_size.y) % alignment != 0) {
+		return false;
+	}
+	const int64_t domain_x = int64_t(sampler_domain.position.x);
+	const int64_t domain_y = int64_t(sampler_domain.position.y);
+	const int64_t domain_width = int64_t(sampler_domain.size.x);
+	const int64_t domain_height = int64_t(sampler_domain.size.y);
+	if (domain_x % alignment != 0 || domain_y % alignment != 0 || domain_width % alignment != 0 || domain_height % alignment != 0) {
+		return false;
+	}
+	return domain_width >= alignment && domain_height >= alignment;
+}
+
 const Rect2 &RendererCanvasRender::Item::get_rect() const {
 	if (custom_rect || (!rect_dirty && !update_when_visible && skeleton == RID())) {
 		return rect;
@@ -61,6 +102,10 @@ const Rect2 &RendererCanvasRender::Item::get_rect() const {
 				const Item::CommandRect *crect = static_cast<const Item::CommandRect *>(c);
 				r = crect->rect;
 
+			} break;
+			case Item::Command::TYPE_TEXTURE_PAGE_RECT: {
+				const Item::CommandTexturePageRect *crect = static_cast<const Item::CommandTexturePageRect *>(c);
+				r = crect->rect;
 			} break;
 			case Item::Command::TYPE_NINEPATCH: {
 				const Item::CommandNinePatch *style = static_cast<const Item::CommandNinePatch *>(c);

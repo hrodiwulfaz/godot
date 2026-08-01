@@ -55,6 +55,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 	enum ShaderVariant {
 		SHADER_VARIANT_QUAD,
+		SHADER_VARIANT_QUAD_PAGE,
 		SHADER_VARIANT_NINEPATCH,
 		SHADER_VARIANT_PRIMITIVE,
 		SHADER_VARIANT_PRIMITIVE_POINTS,
@@ -74,6 +75,9 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		INSTANCE_FLAGS_NINEPATCH_V_MODE_SHIFT = 11,
 
 		INSTANCE_FLAGS_SHADOW_MASKED_SHIFT = 13, // 16 bits.
+
+		INSTANCE_FLAGS_USE_ARRAY_LAYER = (1U << 29),
+		INSTANCE_FLAGS_USE_REGION_SAMPLING = (1U << 30),
 	};
 
 	enum {
@@ -121,6 +125,10 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 				uint32_t use_lighting : 1;
 				uint32_t use_msdf : 1;
 				uint32_t use_lcd : 1;
+				uint32_t use_texture_array : 1;
+				uint32_t use_region_sampling : 1;
+				uint32_t region_mip_nearest : 1;
+				uint32_t region_mip_trilinear : 1;
 			};
 		};
 	};
@@ -363,7 +371,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 				float ninepatch_margins[4];
 				float dst_rect[4];
 				float src_rect[4];
-				float pad[2];
+				uint32_t array_layer;
+				uint32_t max_region_lod;
 			};
 			//primitive
 			struct {
@@ -378,12 +387,16 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	};
 
 	static_assert(sizeof(InstanceData) == 128, "2D instance data struct size must be 128 bytes");
+	static_assert(offsetof(InstanceData, array_layer) == 96, "2D instance array layer must remain at byte 96");
+	static_assert(offsetof(InstanceData, max_region_lod) == 100, "2D instance maximum region LOD must remain at byte 100");
+	static_assert(offsetof(InstanceData, flags) == 104, "2D instance flags must remain at byte 104");
+	static_assert(offsetof(InstanceData, instance_uniforms_ofs) == 108, "2D instance uniform offset must remain at byte 108");
 
 	struct PushConstant {
 		ShaderSpecialization shader_specialization;
 		uint32_t specular_shininess;
 		uint32_t batch_flags;
-		uint32_t pad0;
+		float region_mipmap_bias;
 
 		float msdf[2];
 		float color_texture_pixel_size[2];
@@ -541,7 +554,11 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		bool use_lighting = false;
 		bool use_msdf = false;
 		bool use_lcd = false;
+		bool use_region_sampling = false;
+		bool region_mip_nearest = false;
+		bool region_mip_trilinear = false;
 		bool has_blend = false;
+		float region_mipmap_bias = 0.0f;
 
 		// batch-specific data
 		union {
@@ -556,7 +573,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 			PushConstant pc;
 			pc.specular_shininess = tex_info->specular_shininess;
 			pc.batch_flags = tex_info->flags | flags;
-			pc.pad0 = 0;
+			pc.region_mipmap_bias = region_mipmap_bias;
 
 			pc.msdf[0] = msdf_pix_range;
 			pc.msdf[1] = msdf_outline;
@@ -658,6 +675,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 	RSE::CanvasItemTextureFilter default_filter = RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR;
 	RSE::CanvasItemTextureRepeat default_repeat = RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED;
+	bool use_nearest_mipmap_filter = false;
+	float region_mipmap_bias = 0.0f;
 
 	RID _create_base_uniform_set(RID p_to_render_target, bool p_backbuffer);
 
