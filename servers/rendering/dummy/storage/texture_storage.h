@@ -128,6 +128,9 @@ public:
 		texture->drawable_format = format;
 		return OK;
 	}
+	virtual Error texture_drawable_layered_initialize(RID p_texture, int p_width, int p_height, int p_layers, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) override {
+		return ERR_UNAVAILABLE;
+	}
 
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) override { return RID(); }
 
@@ -155,6 +158,9 @@ public:
 		}
 		return OK;
 	}
+	virtual Error texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) override {
+		return ERR_UNAVAILABLE;
+	}
 	virtual Ref<Image> texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) const override {
 		const DummyTexture *texture = texture_owner.get_or_null(p_texture);
 		ERR_FAIL_NULL_V(texture, Ref<Image>());
@@ -166,6 +172,8 @@ public:
 		const DummyTexture *texture = texture_owner.get_or_null(p_texture);
 		return texture == nullptr ? 0 : texture->drawable_generation;
 	}
+	virtual int texture_drawable_get_max_array_layers() const override { return 0; }
+	virtual bool texture_drawable_is_layered(RID p_texture) const override { return false; }
 
 	//these two APIs can be used together or in combination with the others.
 	virtual void texture_2d_placeholder_initialize(RID p_texture) override {}

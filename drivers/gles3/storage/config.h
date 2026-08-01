@@ -60,6 +60,7 @@ public:
 	GLint max_vertex_texture_image_units = 0;
 	GLint max_texture_image_units = 0;
 	GLint max_texture_size = 0;
+	GLint max_texture_array_layers = 0;
 	GLint max_viewport_size[2] = { 0, 0 };
 	GLint max_vertex_attribs = 0;
 	GLint64 max_uniform_buffer_size = 0;
@@ -85,6 +86,7 @@ public:
 	bool astc_3d_supported = false;
 	bool srgb_framebuffer_supported = false;
 	bool unorm16_texture_supported = false;
+	bool immutable_texture_storage_supported = false;
 
 	bool force_vertex_shading = false;
 	bool specular_occlusion = false;

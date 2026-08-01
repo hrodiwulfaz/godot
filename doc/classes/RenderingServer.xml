@@ -3952,6 +3952,20 @@
 			<description>
 				Draws to [param rect] on up to 4 given Drawable [param textures], using a TextureBlit Shader from [param material]. [param modulate] and up to 4 [param source_textures] are uniforms for the Shader to process with. [param to_mipmap] can specify to perform this draw to a lower mipmap level.
 				[b]Note:[/b] All [param textures] must be the same size and format.
+				[b]Note:[/b] Drawable texture-array RIDs are unsupported; update their explicit mip data with [method texture_drawable_update_subresource] or [method texture_drawable_copy_layer].
+			</description>
+		</method>
+		<method name="texture_drawable_copy_layer">
+			<return type="int" enum="Error" />
+			<param index="0" name="source" type="RID" />
+			<param index="1" name="destination" type="RID" />
+			<param index="2" name="source_layer" type="int" />
+			<param index="3" name="destination_layer" type="int" />
+			<param index="4" name="expected_source_generation" type="int" />
+			<param index="5" name="expected_destination_generation" type="int" />
+			<description>
+				Copies every mipmap of one ordinary drawable or drawable-array layer to another without filtering, resampling, blending, or color conversion. Source and destination must have the same dimensions, drawable format, storage format, and mipmap count. Ordinary drawable textures use layer [code]0[/code].
+				Both expected generations must match before any copy is submitted. Invalid RIDs, profiles, layers, or stale generations leave [param destination] unchanged and return a non-[constant @GlobalScope.OK] result.
 			</description>
 		</method>
 		<method name="texture_drawable_create">
@@ -3971,7 +3985,7 @@
 			<return type="void" />
 			<param index="0" name="texture" type="RID" />
 			<description>
-				Calculates new MipMaps for the given Drawable [param texture].
+				Calculates new mipmaps for an ordinary drawable [param texture]. Drawable texture arrays are unsupported because their mip levels are supplied independently through exact updates and copies.
 			</description>
 		</method>
 		<method name="texture_drawable_get_default_material" qualifiers="const">
@@ -3984,7 +3998,13 @@
 			<return type="int" />
 			<param index="0" name="texture" type="RID" />
 			<description>
-				Returns the drawable resource generation, or [code]0[/code] when [param texture] is not an ordinary drawable texture.
+				Returns the ordinary or layered drawable resource generation, or [code]0[/code] when [param texture] is not a drawable texture.
+			</description>
+		</method>
+		<method name="texture_drawable_get_max_array_layers" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the active rendering backend's maximum number of 2D texture-array layers. Returns [code]0[/code] when drawable texture arrays are unsupported.
 			</description>
 		</method>
 		<method name="texture_drawable_get_subresource" qualifiers="const">
@@ -3995,6 +4015,20 @@
 			<param index="3" name="layer" type="int" default="0" />
 			<description>
 				Reads the exact requested drawable mipmap and layer without regenerating other levels. Returns [code]null[/code] for invalid metadata, a stale generation, or a backend readback format that is unsupported. This diagnostic operation may stall rendering and may transfer more data than the requested mipmap.
+			</description>
+		</method>
+		<method name="texture_drawable_layered_create">
+			<return type="RID" />
+			<param index="0" name="width" type="int" />
+			<param index="1" name="height" type="int" />
+			<param index="2" name="layers" type="int" />
+			<param index="3" name="format" type="int" enum="RenderingServer.TextureDrawableFormat" />
+			<param index="4" name="color" type="Color" default="Color(0, 0, 0, 0)" />
+			<param index="5" name="with_mipmaps" type="bool" default="false" />
+			<description>
+				Synchronously creates a drawable 2D texture array and initializes every layer and mipmap to [param color]. [param layers] must be positive and no greater than [method texture_drawable_get_max_array_layers]. Returns an invalid RID if validation or backend allocation fails.
+				Use the returned RID only with array-aware consumers and [code]texture_drawable_*[/code] methods. Free it with [method free_rid] when finished. The equivalent resource is [DrawableTexture2DArray].
+				[b]Note:[/b] The Compatibility backend uses immutable array storage when provided by GLES or [code]GL_ARB_texture_storage[/code]. Its supported OpenGL 3.3 floor permits a mutable allocation fallback when that extension is unavailable; the public initialization, update, copy, and replacement contracts are unchanged.
 			</description>
 		</method>
 		<method name="texture_drawable_update_subresource">

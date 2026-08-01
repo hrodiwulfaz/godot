@@ -234,6 +234,25 @@ public:
 		}
 		return texture;
 	}
+	virtual RID texture_drawable_layered_create(int p_width, int p_height, int p_layers, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) override {
+		RID texture = RSG::texture_storage->texture_allocate();
+		if (texture.is_null()) {
+			return RID();
+		}
+
+		Error error;
+		// Layered initialization clears through RenderingDevice, which is restricted to the render thread.
+		if (Thread::get_caller_id() == server_thread) {
+			error = RSG::texture_storage->texture_drawable_layered_initialize(texture, p_width, p_height, p_layers, p_format, p_color, p_with_mipmaps);
+		} else {
+			command_queue.push_and_ret(RSG::texture_storage, &RendererTextureStorage::texture_drawable_layered_initialize, &error, texture, p_width, p_height, p_layers, p_format, p_color, p_with_mipmaps);
+		}
+		if (error != OK) {
+			free_rid(texture);
+			return RID();
+		}
+		return texture;
+	}
 
 	// Called directly, not through the command queue.
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) override {
@@ -248,8 +267,10 @@ public:
 
 	FUNC6(texture_drawable_blit_rect, const TypedArray<RID> &, const Rect2i &, RID, const Color &, const TypedArray<RID> &, int)
 	FUNC6R(Error, texture_drawable_update_subresource, RID, const Ref<Image> &, const Rect2i &, int, uint64_t, int)
+	FUNC6R(Error, texture_drawable_copy_layer, RID, RID, int, int, uint64_t, uint64_t)
 	FUNC4RC(Ref<Image>, texture_drawable_get_subresource, RID, int, uint64_t, int)
 	FUNC1RC(uint64_t, texture_drawable_get_generation, RID)
+	FUNC0RC(int, texture_drawable_get_max_array_layers)
 
 	//these also go pass-through
 	FUNCRIDTEX0(texture_2d_placeholder)

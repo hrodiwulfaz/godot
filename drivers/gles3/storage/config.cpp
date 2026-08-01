@@ -89,6 +89,11 @@ Config::Config() {
 	astc_hdr_supported = astc_3d_supported || extensions.has("GL_KHR_texture_compression_astc_hdr");
 	astc_layered_supported = astc_hdr_supported || extensions.has("GL_KHR_texture_compression_astc_sliced_3d");
 	astc_supported = astc_layered_supported || extensions.has("GL_KHR_texture_compression_astc_ldr") || extensions.has("WEBGL_compressed_texture_astc");
+#ifdef GL_API_ENABLED
+	immutable_texture_storage_supported = !RasterizerUtilGLES3::is_gles_over_gl() || (extensions.has("GL_ARB_texture_storage") && glTexStorage3D != nullptr);
+#else
+	immutable_texture_storage_supported = true;
+#endif
 
 	if (RasterizerUtilGLES3::is_gles_over_gl()) {
 		float_texture_supported = true;
@@ -118,6 +123,7 @@ Config::Config() {
 	glGetIntegerv(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, &max_vertex_texture_image_units);
 	glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &max_texture_image_units);
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+	glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &max_texture_array_layers);
 	glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_viewport_size);
 	glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &max_vertex_attribs);
 	glGetInteger64v(GL_MAX_UNIFORM_BLOCK_SIZE, &max_uniform_buffer_size);

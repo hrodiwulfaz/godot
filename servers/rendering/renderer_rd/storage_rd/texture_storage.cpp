@@ -1385,7 +1385,7 @@ Error TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, in
 		rd_format.texture_type = texture->rd_type;
 		rd_format.samples = RD::TEXTURE_SAMPLES_1;
 		// The Color Attachment Usage bit here is what differentiates a DrawableTexture from a regular Texture2D
-		rd_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+		rd_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 		if (texture->rd_format_srgb != RD::DATA_FORMAT_MAX) {
 			rd_format.shareable_formats.push_back(texture->rd_format);
 			rd_format.shareable_formats.push_back(texture->rd_format_srgb);
@@ -1419,6 +1419,96 @@ Error TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, in
 	}
 
 	//used for 2D, overridable
+	texture->width_2d = texture->width;
+	texture->height_2d = texture->height;
+	texture->is_render_target = false;
+	texture->rd_view = rd_view;
+	texture->is_proxy = false;
+	texture->drawable_generation = 1;
+	return OK;
+}
+
+Error TextureStorage::texture_drawable_layered_initialize(RID p_texture, int p_width, int p_height, int p_layers, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) {
+	Texture empty_texture = {};
+	texture_owner.initialize_rid(p_texture, empty_texture);
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_CANT_CREATE);
+
+	ERR_FAIL_COND_V(p_width <= 0 || p_height <= 0 || p_width > 16384 || p_height > 16384, ERR_INVALID_PARAMETER);
+	const int max_layers = texture_drawable_get_max_array_layers();
+	ERR_FAIL_COND_V(p_layers <= 0 || max_layers <= 0 || p_layers > max_layers, ERR_INVALID_PARAMETER);
+
+	Image::Format format;
+	switch (p_format) {
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBA8:
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBA8_SRGB:
+			format = Image::FORMAT_RGBA8;
+			break;
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBAH:
+			format = Image::FORMAT_RGBAH;
+			break;
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBAF:
+			format = Image::FORMAT_RGBAF;
+			break;
+		default:
+			return ERR_INVALID_PARAMETER;
+	}
+
+	Ref<Image> format_image = Image::create_empty(1, 1, false, format);
+	ERR_FAIL_COND_V(format_image.is_null(), ERR_CANT_CREATE);
+	TextureToRDFormat ret_format;
+	Ref<Image> valid_image = _validate_texture_format(format_image, ret_format);
+	ERR_FAIL_COND_V(valid_image.is_null(), ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V(valid_image->get_format() != format, ERR_UNAVAILABLE);
+
+	texture->type = TextureStorage::TYPE_LAYERED;
+	texture->layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY;
+	texture->width = p_width;
+	texture->height = p_height;
+	texture->layers = p_layers;
+	texture->mipmaps = p_with_mipmaps ? Image::get_image_required_mipmaps(p_width, p_height, format) + 1 : 1;
+	texture->depth = 1;
+	texture->format = format;
+	texture->validated_format = valid_image->get_format();
+	texture->drawable_type = p_format;
+	texture->rd_type = RD::TEXTURE_TYPE_2D_ARRAY;
+	texture->rd_format = ret_format.format;
+	texture->rd_format_srgb = ret_format.format_srgb;
+
+	RD::TextureFormat rd_format;
+	rd_format.format = texture->rd_format;
+	rd_format.width = texture->width;
+	rd_format.height = texture->height;
+	rd_format.depth = 1;
+	rd_format.array_layers = texture->layers;
+	rd_format.mipmaps = texture->mipmaps;
+	rd_format.texture_type = texture->rd_type;
+	rd_format.samples = RD::TEXTURE_SAMPLES_1;
+	rd_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	if (texture->rd_format_srgb != RD::DATA_FORMAT_MAX) {
+		rd_format.shareable_formats.push_back(texture->rd_format);
+		rd_format.shareable_formats.push_back(texture->rd_format_srgb);
+	}
+
+	RD::TextureView rd_view;
+	rd_view.swizzle_r = ret_format.swizzle_r;
+	rd_view.swizzle_g = ret_format.swizzle_g;
+	rd_view.swizzle_b = ret_format.swizzle_b;
+	rd_view.swizzle_a = ret_format.swizzle_a;
+
+	texture->rd_texture = RD::get_singleton()->texture_create(rd_format, rd_view);
+	ERR_FAIL_COND_V(texture->rd_texture.is_null(), ERR_CANT_CREATE);
+	if (texture->rd_format_srgb != RD::DATA_FORMAT_MAX) {
+		rd_view.format_override = texture->rd_format_srgb;
+		texture->rd_texture_srgb = RD::get_singleton()->texture_create_shared(rd_view, texture->rd_texture);
+		ERR_FAIL_COND_V(texture->rd_texture_srgb.is_null(), ERR_CANT_CREATE);
+	}
+
+	const Error clear_error = RD::get_singleton()->texture_clear(texture->rd_texture, p_color, 0, texture->mipmaps, 0, texture->layers);
+	if (clear_error != OK) {
+		return clear_error;
+	}
+
 	texture->width_2d = texture->width;
 	texture->height_2d = texture->height;
 	texture->is_render_target = false;
@@ -1884,9 +1974,12 @@ void TextureStorage::texture_drawable_blit_rect(const TypedArray<RID> &p_texture
 Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer) {
 	Texture *texture = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != TextureStorage::TYPE_2D || texture->is_proxy || texture->is_render_target, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->type != TextureStorage::TYPE_2D && (texture->type != TextureStorage::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
-	ERR_FAIL_COND_V(p_layer != 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_layer < 0 || p_layer >= texture->layers, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_image.is_null() || p_image->has_mipmaps(), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_destination_region.position.x < 0 || p_destination_region.position.y < 0, ERR_INVALID_PARAMETER);
@@ -1914,9 +2007,39 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 	const Vector<uint8_t> data = p_image->get_data();
 	ERR_FAIL_COND_V(data.size() != expected_size, ERR_INVALID_DATA);
 
-	Error error = RD::get_singleton()->texture_update_region(texture->rd_texture, 0, p_mipmap, p_destination_region, data);
+	Error error = RD::get_singleton()->texture_update_region(texture->rd_texture, p_layer, p_mipmap, p_destination_region, data);
 	if (error == OK) {
 		texture->image_cache_2d.unref();
+	}
+	return error;
+}
+
+Error TextureStorage::texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) {
+	Texture *source = texture_owner.get_or_null(p_source);
+	ERR_FAIL_NULL_V(source, ERR_INVALID_PARAMETER);
+	Texture *destination = texture_owner.get_or_null(p_destination);
+	ERR_FAIL_NULL_V(destination, ERR_INVALID_PARAMETER);
+
+	const bool source_drawable = source->drawable_generation != 0 &&
+			(source->type == TextureStorage::TYPE_2D || (source->type == TextureStorage::TYPE_LAYERED && source->layered_type == RSE::TEXTURE_LAYERED_2D_ARRAY)) &&
+			!source->is_proxy && !source->is_render_target;
+	const bool destination_drawable = destination->drawable_generation != 0 &&
+			(destination->type == TextureStorage::TYPE_2D || (destination->type == TextureStorage::TYPE_LAYERED && destination->layered_type == RSE::TEXTURE_LAYERED_2D_ARRAY)) &&
+			!destination->is_proxy && !destination->is_render_target;
+	ERR_FAIL_COND_V(!source_drawable || !destination_drawable, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->drawable_generation != p_expected_source_generation || destination->drawable_generation != p_expected_destination_generation, ERR_INVALID_DATA);
+	ERR_FAIL_COND_V(p_source_layer < 0 || p_source_layer >= source->layers || p_destination_layer < 0 || p_destination_layer >= destination->layers, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->width != destination->width ||
+					source->height != destination->height ||
+					source->mipmaps != destination->mipmaps ||
+					source->format != destination->format ||
+					source->validated_format != destination->validated_format ||
+					source->drawable_type != destination->drawable_type,
+			ERR_INVALID_PARAMETER);
+
+	const Error error = RD::get_singleton()->texture_copy_layer(source->rd_texture, destination->rd_texture, p_source_layer, p_destination_layer);
+	if (error == OK) {
+		destination->image_cache_2d.unref();
 	}
 	return error;
 }
@@ -1924,9 +2047,12 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer) const {
 	Texture *texture = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL_V(texture, Ref<Image>());
-	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != TextureStorage::TYPE_2D || texture->is_proxy || texture->is_render_target, Ref<Image>());
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->type != TextureStorage::TYPE_2D && (texture->type != TextureStorage::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			Ref<Image>());
 	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, Ref<Image>());
-	ERR_FAIL_COND_V(p_layer != 0, Ref<Image>());
+	ERR_FAIL_COND_V(p_layer < 0 || p_layer >= texture->layers, Ref<Image>());
 	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, Ref<Image>());
 	ERR_FAIL_COND_V(texture->validated_format != texture->format, Ref<Image>());
 
@@ -1959,10 +2085,24 @@ Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p
 
 uint64_t TextureStorage::texture_drawable_get_generation(RID p_texture) const {
 	const Texture *texture = texture_owner.get_or_null(p_texture);
-	if (texture == nullptr || texture->is_proxy || texture->type != TextureStorage::TYPE_2D) {
+	if (texture == nullptr || texture->is_proxy ||
+			(texture->type != TextureStorage::TYPE_2D && (texture->type != TextureStorage::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY))) {
 		return 0;
 	}
 	return texture->drawable_generation;
+}
+
+int TextureStorage::texture_drawable_get_max_array_layers() const {
+	return int(MIN(uint64_t(INT32_MAX), RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_ARRAY_LAYERS)));
+}
+
+bool TextureStorage::texture_drawable_is_layered(RID p_texture) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	return texture != nullptr &&
+			texture->drawable_generation != 0 &&
+			!texture->is_proxy &&
+			texture->type == TextureStorage::TYPE_LAYERED &&
+			texture->layered_type == RSE::TEXTURE_LAYERED_2D_ARRAY;
 }
 
 //these two APIs can be used together or in combination with the others.
