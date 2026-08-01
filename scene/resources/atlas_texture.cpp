@@ -193,6 +193,28 @@ void AtlasTexture::draw_rect_region(RID p_canvas_item, const Rect2 &p_rect, cons
 	}
 }
 
+Vector2 AtlasTexture::get_clipped_draw_offset(const Rect2 &p_src_rect, const Rect2 &p_clipped_src_rect, const Vector2 &p_scale, bool p_transpose) {
+	Vector2 ofs = p_clipped_src_rect.position - p_src_rect.position;
+	const Vector2 tail = p_clipped_src_rect.size - p_src_rect.size;
+	if (!p_transpose) {
+		if (p_scale.x < 0) {
+			ofs.x += tail.x;
+		}
+		if (p_scale.y < 0) {
+			ofs.y += tail.y;
+		}
+		return ofs * p_scale;
+	}
+	// The renderer flips a transposed rectangle along destination axes: the x flip runs along source y.
+	if (p_scale.x < 0) {
+		ofs.y += tail.y;
+	}
+	if (p_scale.y < 0) {
+		ofs.x += tail.x;
+	}
+	return Vector2(ofs.y * Math::abs(p_scale.y) * SIGN(p_scale.x), ofs.x * Math::abs(p_scale.x) * SIGN(p_scale.y));
+}
+
 bool AtlasTexture::get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, Rect2 &r_rect, Rect2 &r_src_rect) const {
 	if (atlas.is_null()) {
 		return false;

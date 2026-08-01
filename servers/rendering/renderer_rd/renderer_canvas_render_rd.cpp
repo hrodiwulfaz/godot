@@ -506,7 +506,40 @@ RID RendererCanvasRenderRD::_get_pipeline_specialization_or_ubershader(CanvasSha
 	return RID();
 }
 
+void RendererCanvasRenderRD::_reset_render_memos() {
+	for (PageMemo &memo : page_memo) {
+		memo.texture = RID();
+	}
+	page_memo_next = 0;
+	last_texture_info = nullptr;
+}
+
+const RendererCanvasRenderRD::PageMemo &RendererCanvasRenderRD::_get_page_memo(RID p_texture) {
+	if (p_texture.is_null()) {
+		static const PageMemo empty;
+		return empty;
+	}
+	for (const PageMemo &memo : page_memo) {
+		if (memo.texture == p_texture) {
+			return memo;
+		}
+	}
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	PageMemo &memo = page_memo[page_memo_next];
+	page_memo_next = (page_memo_next + 1) % PAGE_MEMO_SIZE;
+	memo.texture = p_texture;
+	memo.owned = texture_storage->owns_texture(p_texture);
+	memo.size = memo.owned ? texture_storage->texture_2d_get_size(p_texture) : Size2i();
+	memo.mipmaps = memo.owned ? texture_storage->texture_get_mipmap_count(p_texture) : 0;
+	memo.layered = memo.owned && texture_storage->texture_drawable_is_layered(p_texture);
+	memo.layers = memo.owned ? texture_storage->texture_get_layers(p_texture) : 0;
+	memo.type_2d = memo.owned && texture_storage->texture_get_type(p_texture) == RendererRD::TextureStorage::TYPE_2D;
+	memo.generation = memo.owned ? texture_storage->texture_drawable_get_generation(p_texture) : 0;
+	return memo;
+}
+
 void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p_item_list, const Color &p_modulate, Light *p_light_list, Light *p_directional_light_list, const Transform2D &p_canvas_transform, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, bool &r_sdf_used, RenderingServerTypes::RenderInfo *r_render_info) {
+	_reset_render_memos();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
@@ -916,6 +949,7 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 	}
 
 	texture_info_map.clear();
+	_reset_render_memos();
 
 	// Save the previous instance data pointer in case more items are rendered in the same frame.
 	state.prev_instance_data = state.instance_data;
@@ -1739,7 +1773,7 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 	}
 
 	// preallocate slots for uniform set 3
-	state.batch_texture_uniforms.resize(4);
+	state.batch_texture_uniforms.resize(5);
 
 	{ //shader variants
 
@@ -2412,23 +2446,26 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				const Item::CommandTexturePageRect *rect = static_cast<const Item::CommandTexturePageRect *>(c);
 				RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
-				const bool page_owned = texture_storage->owns_texture(rect->texture);
-				const Size2i page_size = page_owned ? texture_storage->texture_2d_get_size(rect->texture) : Size2i();
-				const int page_mipmap_count = page_owned ? texture_storage->texture_get_mipmap_count(rect->texture) : 0;
-				const bool page_kind_valid = page_owned && texture_storage->texture_get_type(rect->texture) == RendererRD::TextureStorage::TYPE_2D;
-				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid(page_size, page_mipmap_count);
-				const bool page_generation_valid = page_owned &&
-						texture_storage->texture_drawable_get_generation(rect->texture) == rect->expected_generation;
+				const PageMemo &page = _get_page_memo(rect->texture);
+				const bool page_owned = page.owned;
+				const Size2i page_size = page.size;
+				const int page_mipmap_count = page.mipmaps;
+				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
+				const bool page_kind_valid = page_owned &&
+						(array_requested
+										? page.layered && rect->array_layer < uint32_t(page.layers)
+										: page.type_2d && rect->array_layer == 0);
+				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid_cached(page.generation, page_size, page_mipmap_count);
+				const bool page_generation_valid = page_owned && page.generation == rect->expected_generation;
 				const bool anisotropic_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC ||
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
-				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
 				const bool use_page = page_geometry_valid &&
 						page_generation_valid &&
-						!array_requested &&
 						r_current_batch->material.is_null() &&
 						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
 						!anisotropic_filter &&
 						!bool(rect->flags & CANVAS_RECT_CLIP_UV);
+				const bool use_texture_array = use_page && array_requested;
 
 				if (page_owned && !page_geometry_valid) {
 					ERR_PRINT_ONCE("CanvasTexturePageView physical metadata is malformed. Drawing its ordinary fallback.");
@@ -2474,11 +2511,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				TextureState tex_state(texture, texture_filter, texture_repeat, false, use_linear_colors);
-				TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-				if (!tex_info) {
-					tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-					_prepare_batch_texture_info(texture, tex_state, tex_info);
-				}
+				TextureInfo *tex_info = _get_texture_info(tex_state);
 
 				if (r_current_batch->use_msdf || r_current_batch->use_lcd) {
 					r_current_batch = _new_batch(r_batch_broken);
@@ -2491,11 +2524,13 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				const bool region_mip_nearest = use_page && mipmapped_filter && use_nearest_mipmap_filter;
 				const bool region_mip_trilinear = use_page && mipmapped_filter && !use_nearest_mipmap_filter;
 				const float batch_region_mipmap_bias = use_page ? region_mipmap_bias : 0.0f;
-				if (r_current_batch->use_region_sampling != use_page ||
+				if (r_current_batch->use_texture_array != use_texture_array ||
+						r_current_batch->use_region_sampling != use_page ||
 						r_current_batch->region_mip_nearest != region_mip_nearest ||
 						r_current_batch->region_mip_trilinear != region_mip_trilinear ||
 						r_current_batch->region_mipmap_bias != batch_region_mipmap_bias) {
 					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->use_texture_array = use_texture_array;
 					r_current_batch->use_region_sampling = use_page;
 					r_current_batch->region_mip_nearest = region_mip_nearest;
 					r_current_batch->region_mip_trilinear = region_mip_trilinear;
@@ -2556,6 +2591,9 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 					instance_data->array_layer = rect->array_layer;
 					instance_data->max_region_lod = rect->max_region_lod;
 					instance_data->flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
+					if (use_texture_array) {
+						instance_data->flags |= INSTANCE_FLAGS_USE_ARRAY_LAYER;
+					}
 				}
 
 				_add_to_batch(r_batch_broken, r_current_batch);
@@ -2598,11 +2636,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 
 				bool has_msdf = bool(rect->flags & CANVAS_RECT_MSDF);
 				TextureState tex_state(rect->texture, texture_filter, rect_repeat, has_msdf, use_linear_colors);
-				TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-				if (!tex_info) {
-					tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-					_prepare_batch_texture_info(rect->texture, tex_state, tex_info);
-				}
+				TextureInfo *tex_info = _get_texture_info(tex_state);
 
 				if (has_msdf != r_current_batch->use_msdf || rect->px_range != r_current_batch->msdf_pix_range || rect->outline != r_current_batch->msdf_outline) {
 					r_current_batch = _new_batch(r_batch_broken);
@@ -2704,11 +2738,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				TextureState tex_state(np->texture, texture_filter, texture_repeat, false, use_linear_colors);
-				TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-				if (!tex_info) {
-					tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-					_prepare_batch_texture_info(np->texture, tex_state, tex_info);
-				}
+				TextureInfo *tex_info = _get_texture_info(tex_state);
 
 				if (r_current_batch->tex_info != tex_info) {
 					r_current_batch = _new_batch(r_batch_broken);
@@ -2780,11 +2810,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				r_current_batch->use_lcd = false;
 
 				TextureState tex_state(polygon->texture, texture_filter, texture_repeat, false, use_linear_colors);
-				TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-				if (!tex_info) {
-					tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-					_prepare_batch_texture_info(polygon->texture, tex_state, tex_info);
-				}
+				TextureInfo *tex_info = _get_texture_info(tex_state);
 
 				if (r_current_batch->tex_info != tex_info) {
 					r_current_batch = _new_batch(r_batch_broken);
@@ -2845,11 +2871,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				TextureState tex_state(primitive->texture, texture_filter, texture_repeat, false, use_linear_colors);
-				TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-				if (!tex_info) {
-					tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-					_prepare_batch_texture_info(primitive->texture, tex_state, tex_info);
-				}
+				TextureInfo *tex_info = _get_texture_info(tex_state);
 
 				if (r_current_batch->tex_info != tex_info) {
 					r_current_batch = _new_batch(r_batch_broken);
@@ -2913,11 +2935,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				if (c->type == Item::Command::TYPE_MESH) {
 					const Item::CommandMesh *m = static_cast<const Item::CommandMesh *>(c);
 					TextureState tex_state(m->texture, texture_filter, texture_repeat, false, use_linear_colors);
-					TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-					if (!tex_info) {
-						tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-						_prepare_batch_texture_info(m->texture, tex_state, tex_info);
-					}
+					TextureInfo *tex_info = _get_texture_info(tex_state);
 					r_current_batch->tex_info = tex_info;
 					instance_data = new_instance_data(*r_current_batch, template_instance, true);
 
@@ -2940,11 +2958,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 					}
 
 					TextureState tex_state(mm->texture, texture_filter, texture_repeat, false, use_linear_colors);
-					TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-					if (!tex_info) {
-						tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-						_prepare_batch_texture_info(mm->texture, tex_state, tex_info);
-					}
+					TextureInfo *tex_info = _get_texture_info(tex_state);
 					r_current_batch->tex_info = tex_info;
 					instance_data = new_instance_data(*r_current_batch, template_instance, true);
 
@@ -2962,11 +2976,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 
 					const Item::CommandParticles *pt = static_cast<const Item::CommandParticles *>(c);
 					TextureState tex_state(pt->texture, texture_filter, texture_repeat, false, use_linear_colors);
-					TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-					if (!tex_info) {
-						tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-						_prepare_batch_texture_info(pt->texture, tex_state, tex_info);
-					}
+					TextureInfo *tex_info = _get_texture_info(tex_state);
 					r_current_batch->tex_info = tex_info;
 					instance_data = new_instance_data(*r_current_batch, template_instance, true);
 
@@ -3078,11 +3088,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 		}
 
 		TextureState tex_state(default_canvas_texture, texture_filter, texture_repeat, false, use_linear_colors);
-		TextureInfo *tex_info = texture_info_map.getptr(tex_state);
-		if (!tex_info) {
-			tex_info = &texture_info_map.insert(tex_state, TextureInfo())->value;
-			_prepare_batch_texture_info(default_canvas_texture, tex_state, tex_info);
-		}
+		TextureInfo *tex_info = _get_texture_info(tex_state);
 
 		if (r_current_batch->tex_info != tex_info) {
 			r_current_batch = _new_batch(r_batch_broken);
@@ -3174,7 +3180,9 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 			uniform_ptrw[1] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_batch->tex_info->normal);
 			uniform_ptrw[2] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_batch->tex_info->specular);
 			uniform_ptrw[3] = RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, p_batch->tex_info->sampler);
+			uniform_ptrw[4] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 4, p_batch->tex_info->diffuse_array);
 
+			// QUAD owns this shared set, so its set 3 layout must remain compatible with QUAD_PAGE.
 			RID rid = RD::get_singleton()->uniform_set_create(state.batch_texture_uniforms, shader.default_version_rd_shader, BATCH_UNIFORM_SET);
 			ERR_FAIL_COND_MSG(rid.is_null(), "Failed to create uniform set for batch.");
 
@@ -3211,6 +3219,7 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	pipeline_key.shader_specialization.use_msdf = p_batch->use_msdf;
 	pipeline_key.shader_specialization.use_lcd = p_batch->use_lcd;
 	const bool is_page_batch = p_batch->command_type == Item::Command::TYPE_TEXTURE_PAGE_RECT;
+	pipeline_key.shader_specialization.use_texture_array = is_page_batch && p_batch->use_texture_array;
 	pipeline_key.shader_specialization.use_region_sampling = is_page_batch && p_batch->use_region_sampling;
 	pipeline_key.shader_specialization.region_mip_nearest = is_page_batch && p_batch->region_mip_nearest;
 	pipeline_key.shader_specialization.region_mip_trilinear = is_page_batch && p_batch->region_mip_trilinear;
@@ -3478,8 +3487,9 @@ void RendererCanvasRenderRD::_prepare_batch_texture_info(RID p_texture, TextureS
 		p_texture = default_canvas_texture;
 	}
 
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::TextureStorage::CanvasTextureInfo info =
-			RendererRD::TextureStorage::get_singleton()->canvas_texture_get_info(
+			texture_storage->canvas_texture_get_info(
 					p_texture,
 					p_state.texture_filter(),
 					p_state.texture_repeat(),
@@ -3492,7 +3502,9 @@ void RendererCanvasRenderRD::_prepare_batch_texture_info(RID p_texture, TextureS
 	}
 
 	p_info->state = p_state;
-	p_info->diffuse = info.diffuse;
+	const bool use_texture_array = texture_storage->texture_drawable_is_layered(p_texture);
+	p_info->diffuse = use_texture_array ? texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE) : info.diffuse;
+	p_info->diffuse_array = use_texture_array ? info.diffuse : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	p_info->normal = info.normal;
 	p_info->specular = info.specular;
 	p_info->sampler = info.sampler;

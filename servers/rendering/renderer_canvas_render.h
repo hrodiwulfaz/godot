@@ -227,6 +227,22 @@ public:
 			Rect2 fallback_source;
 
 			bool is_geometry_valid(const Size2i &p_page_size, int p_mipmap_count) const;
+			// The geometry check depends only on the command and the page it ran against: its result is kept for the
+			// same page generation, real size and mip count. A size override that keeps the generation checks again.
+			mutable uint64_t checked_generation = 0;
+			mutable Size2i checked_size;
+			mutable int checked_mipmaps = 0;
+			mutable bool checked_valid = false;
+			_FORCE_INLINE_ bool is_geometry_valid_cached(uint64_t p_generation, const Size2i &p_page_size, int p_mipmap_count) const {
+				if (p_generation != 0 && checked_generation == p_generation && checked_size == p_page_size && checked_mipmaps == p_mipmap_count) {
+					return checked_valid;
+				}
+				checked_valid = is_geometry_valid(p_page_size, p_mipmap_count);
+				checked_generation = p_generation;
+				checked_size = p_page_size;
+				checked_mipmaps = p_mipmap_count;
+				return checked_valid;
+			}
 
 			CommandTexturePageRect() {
 				type = TYPE_TEXTURE_PAGE_RECT;

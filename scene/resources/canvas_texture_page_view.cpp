@@ -31,21 +31,27 @@
 #include "canvas_texture_page_view.h"
 
 #include "core/object/class_db.h"
+#include "scene/resources/atlas_texture.h"
 #include "scene/resources/drawable_texture_2d.h"
+#include "scene/resources/drawable_texture_2d_array.h"
 #include "servers/rendering/rendering_server.h"
 
 Error CanvasTexturePageView::configure(const Ref<Texture> &p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, const Ref<Texture2D> &p_fallback_texture) {
 	ERR_FAIL_COND_V(configured, ERR_ALREADY_IN_USE);
 	ERR_FAIL_COND_V(p_page_texture.is_null(), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_physical_region.position.x < 0 || p_physical_region.position.y < 0 || p_physical_region.size.x <= 0 || p_physical_region.size.y <= 0, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(p_array_layer != 0 || p_max_region_lod > 30 || p_expected_generation == 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_max_region_lod > 30 || p_expected_generation == 0, ERR_INVALID_PARAMETER);
 
 	Ref<DrawableTexture2D> drawable = p_page_texture;
-	ERR_FAIL_COND_V(drawable.is_null(), ERR_UNAVAILABLE);
-	const int page_width = drawable->get_width();
-	const int page_height = drawable->get_height();
-	const RID page_rid = drawable->get_rid();
-	const int page_mipmap_count = drawable->get_use_mipmaps() ? Image::get_image_required_mipmaps(page_width, page_height, drawable->get_format()) + 1 : 1;
+	Ref<DrawableTexture2DArray> drawable_array = p_page_texture;
+	ERR_FAIL_COND_V(drawable.is_null() && drawable_array.is_null(), ERR_UNAVAILABLE);
+	const int page_width = drawable.is_valid() ? drawable->get_width() : drawable_array->get_width();
+	const int page_height = drawable.is_valid() ? drawable->get_height() : drawable_array->get_height();
+	const bool page_has_mipmaps = drawable.is_valid() ? drawable->get_use_mipmaps() : drawable_array->has_mipmaps();
+	const Image::Format page_format = drawable.is_valid() ? drawable->get_format() : drawable_array->get_format();
+	const RID page_rid = drawable.is_valid() ? drawable->get_rid() : drawable_array->get_rid();
+	const int page_mipmap_count = page_has_mipmaps ? Image::get_image_required_mipmaps(page_width, page_height, page_format) + 1 : 1;
+	ERR_FAIL_COND_V(drawable.is_valid() ? p_array_layer != 0 : p_array_layer >= uint32_t(drawable_array->get_layers()), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(int64_t(p_physical_region.position.x) + p_physical_region.size.x > page_width || int64_t(p_physical_region.position.y) + p_physical_region.size.y > page_height, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_max_region_lod >= uint32_t(page_mipmap_count), ERR_INVALID_PARAMETER);
 	if (p_fallback_texture.is_valid()) {
@@ -128,7 +134,7 @@ void CanvasTexturePageView::draw_rect_region(RID p_canvas_item, const Rect2 &p_r
 
 	Rect2 clipped_rect;
 	Rect2 clipped_source;
-	if (!get_rect_region(p_rect, p_src_rect, clipped_rect, clipped_source)) {
+	if (!get_rect_region(p_rect, p_src_rect, p_transpose, clipped_rect, clipped_source)) {
 		return;
 	}
 	const Rect2 fallback_source = _get_fallback_source(clipped_source);
@@ -165,6 +171,10 @@ Rect2 CanvasTexturePageView::_get_fallback_source(const Rect2 &p_logical_source)
 }
 
 bool CanvasTexturePageView::get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, Rect2 &r_rect, Rect2 &r_src_rect) const {
+	return get_rect_region(p_rect, p_src_rect, false, r_rect, r_src_rect);
+}
+
+bool CanvasTexturePageView::get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, bool p_transpose, Rect2 &r_rect, Rect2 &r_src_rect) const {
 	if (!configured) {
 		return false;
 	}
@@ -183,15 +193,7 @@ bool CanvasTexturePageView::get_rect_region(const Rect2 &p_rect, const Rect2 &p_
 		return false;
 	}
 
-	Vector2 offset = clipped_source.position - source.position;
-	if (scale.x < 0) {
-		offset.x += clipped_source.size.x - source.size.x;
-	}
-	if (scale.y < 0) {
-		offset.y += clipped_source.size.y - source.size.y;
-	}
-
-	r_rect = Rect2(p_rect.position + offset * scale, clipped_source.size * scale);
+	r_rect = Rect2(p_rect.position + AtlasTexture::get_clipped_draw_offset(source, clipped_source, scale, p_transpose), clipped_source.size * scale);
 	r_src_rect = clipped_source;
 	return true;
 }

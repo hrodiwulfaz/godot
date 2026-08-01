@@ -483,6 +483,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	struct TextureInfo {
 		TextureState state;
 		RID diffuse;
+		RID diffuse_array;
 		RID normal;
 		RID specular;
 		RID sampler;
@@ -557,6 +558,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		bool use_lighting = false;
 		bool use_msdf = false;
 		bool use_lcd = false;
+		bool use_texture_array = false;
 		bool use_region_sampling = false;
 		bool region_mip_nearest = false;
 		bool region_mip_trilinear = false;
@@ -598,6 +600,40 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	};
 
 	HashMap<TextureState, TextureInfo, HashMapHasherDefault, HashMapComparatorDefault<TextureState>, PagedAllocator<HashMapElement<TextureState, TextureInfo>>> texture_info_map;
+
+	// Page metadata read once per canvas render: the rectangles of one page repeat the same storage lookups.
+	struct PageMemo {
+		RID texture;
+		bool owned = false;
+		bool layered = false;
+		bool type_2d = false;
+		int layers = 0;
+		int mipmaps = 0;
+		Size2i size;
+		uint64_t generation = 0;
+	};
+	static constexpr uint32_t PAGE_MEMO_SIZE = 4;
+	PageMemo page_memo[PAGE_MEMO_SIZE];
+	uint32_t page_memo_next = 0;
+	TextureState last_texture_state;
+	TextureInfo *last_texture_info = nullptr;
+
+	void _reset_render_memos();
+	const PageMemo &_get_page_memo(RID p_texture);
+	_FORCE_INLINE_ TextureInfo *_get_texture_info(const TextureState &p_state) {
+		if (last_texture_info && last_texture_state == p_state) {
+			return last_texture_info;
+		}
+		TextureInfo *info = texture_info_map.getptr(p_state);
+		if (!info) {
+			TextureState texture_state = p_state;
+			info = &texture_info_map.insert(p_state, TextureInfo())->value;
+			_prepare_batch_texture_info(p_state.texture, texture_state, info);
+		}
+		last_texture_state = p_state;
+		last_texture_info = info;
+		return info;
+	}
 
 	struct State {
 		//state buffer

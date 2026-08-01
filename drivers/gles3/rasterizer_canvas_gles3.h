@@ -371,6 +371,23 @@ public:
 	void _record_item_commands(const Item *p_item, RID p_render_target, const Transform2D &p_canvas_transform_inverse, Item *&current_clip, GLES3::CanvasShaderData::BlendMode p_blend_mode, Light *p_lights, uint32_t &r_index, bool &r_break_batch, bool &r_sdf_used, const Point2 &p_repeat_offset);
 	void _render_batch(Light *p_lights, uint32_t p_index, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
 	bool _bind_material(GLES3::CanvasMaterialData *p_material_data, CanvasShaderGLES3::ShaderVariant p_variant, uint64_t p_specialization);
+	// Page metadata read once per canvas render: the rectangles of one page repeat the same storage lookups.
+	struct PageMemo {
+		RID texture;
+		bool owned = false;
+		bool layered = false;
+		bool type_2d = false;
+		int layers = 0;
+		int mipmaps = 0;
+		Size2i size;
+		uint64_t generation = 0;
+	};
+	static constexpr uint32_t PAGE_MEMO_SIZE = 4;
+	PageMemo page_memo[PAGE_MEMO_SIZE];
+	uint32_t page_memo_next = 0;
+	void _reset_page_memo();
+	const PageMemo &_get_page_memo(RID p_texture);
+
 	void _new_batch(bool &r_batch_broken);
 	void _add_to_batch(uint32_t &r_index, bool &r_batch_broken);
 	void _allocate_instance_data_buffer();
