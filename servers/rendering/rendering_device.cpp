@@ -2390,6 +2390,143 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 	return OK;
 }
 
+Error RenderingDevice::texture_update_region(RID p_texture, uint32_t p_layer, uint32_t p_mipmap, const Rect2i &p_region, const Vector<uint8_t> &p_data) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+
+	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a draw list.");
+	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a compute list.");
+	ERR_FAIL_COND_V_MSG(raytracing_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a raytracing list.");
+
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+
+	if (texture->owner != RID()) {
+		p_texture = texture->owner;
+		texture = texture_owner.get_or_null(texture->owner);
+		ERR_FAIL_NULL_V(texture, ERR_BUG);
+	}
+
+	ERR_FAIL_COND_V_MSG(texture->bound, ERR_CANT_ACQUIRE_RESOURCE,
+			"Texture can't be updated while a draw list that uses it as part of a framebuffer is being created. Ensure the draw list is finalized before updating this texture.");
+	ERR_FAIL_COND_V_MSG(!(texture->usage_flags & TEXTURE_USAGE_CAN_UPDATE_BIT), ERR_INVALID_PARAMETER,
+			"Texture requires the `RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT` to be set to be updatable.");
+	ERR_FAIL_COND_V(texture->type == TEXTURE_TYPE_3D, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V(texture->samples != TEXTURE_SAMPLES_1, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V(p_layer >= _texture_layer_count(texture), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_mipmap >= texture->mipmaps, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_region.position.x < 0 || p_region.position.y < 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_region.size.x <= 0 || p_region.size.y <= 0, ERR_INVALID_PARAMETER);
+
+	const uint32_t mip_width = MAX(1u, texture->width >> p_mipmap);
+	const uint32_t mip_height = MAX(1u, texture->height >> p_mipmap);
+	ERR_FAIL_COND_V(uint64_t(p_region.position.x) + uint64_t(p_region.size.x) > mip_width, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(uint64_t(p_region.position.y) + uint64_t(p_region.size.y) > mip_height, ERR_INVALID_PARAMETER);
+
+	uint32_t block_width = 0;
+	uint32_t block_height = 0;
+	get_compressed_image_format_block_dimensions(texture->format, block_width, block_height);
+	ERR_FAIL_COND_V_MSG(block_width != 1 || block_height != 1, ERR_UNAVAILABLE,
+			"Compressed texture formats are not supported by texture_update_region().");
+
+	const uint32_t pixel_size = get_image_format_pixel_size(texture->format);
+	ERR_FAIL_COND_V(pixel_size == 0, ERR_UNAVAILABLE);
+	const uint64_t required_size = uint64_t(p_region.size.x) * uint64_t(p_region.size.y) * pixel_size;
+	ERR_FAIL_COND_V(required_size != uint64_t(p_data.size()), ERR_INVALID_PARAMETER);
+
+	// Split the exact region into chunks that each fit one upload staging block, following the
+	// same staging allocation and draw-graph submission pattern as texture_update().
+	const uint32_t pitch_step = driver->api_trait_get(RDD::API_TRAIT_TEXTURE_DATA_ROW_PITCH_STEP);
+	const uint32_t staging_block_size = upload_staging_buffers.block_size;
+	ERR_FAIL_COND_V(pitch_step == 0 || staging_block_size < pitch_step, ERR_OUT_OF_MEMORY);
+
+	const uint64_t region_row_bytes = uint64_t(p_region.size.x) * pixel_size;
+	ERR_FAIL_COND_V(region_row_bytes > UINT32_MAX, ERR_OUT_OF_MEMORY);
+	const uint32_t region_row_pitch = STEPIFY(uint32_t(region_row_bytes), pitch_step);
+	uint32_t chunk_columns = uint32_t(p_region.size.x);
+	uint32_t chunk_rows = 1;
+	if (region_row_pitch <= staging_block_size) {
+		chunk_rows = MIN(staging_block_size / region_row_pitch, uint32_t(p_region.size.y));
+	} else {
+		const uint32_t usable_pitch = (staging_block_size / pitch_step) * pitch_step;
+		chunk_columns = usable_pitch / pixel_size;
+		ERR_FAIL_COND_V(chunk_columns == 0, ERR_OUT_OF_MEMORY);
+	}
+
+	const uint32_t required_alignment = _texture_alignment(texture);
+	const uint32_t source_row_pitch = uint32_t(p_region.size.x) * pixel_size;
+	const uint8_t *read_ptr = p_data.ptr();
+
+	// Clear the texture if the driver requires it during its first use.
+	_texture_check_pending_clear(p_texture, texture);
+
+	_check_transfer_worker_texture(texture);
+
+	// Indicate the texture will get modified for the shared texture fallback.
+	_texture_update_shared_fallback(p_texture, texture, true);
+
+	thread_local LocalVector<RDG::RecordedBufferToTextureCopy> command_buffer_to_texture_copies_vector;
+	command_buffer_to_texture_copies_vector.clear();
+
+	for (uint32_t y = 0; y < uint32_t(p_region.size.y); y += chunk_rows) {
+		const uint32_t rows = MIN(chunk_rows, uint32_t(p_region.size.y) - y);
+		for (uint32_t x = 0; x < uint32_t(p_region.size.x); x += chunk_columns) {
+			const uint32_t columns = MIN(chunk_columns, uint32_t(p_region.size.x) - x);
+			const uint32_t chunk_row_bytes = columns * pixel_size;
+			const uint32_t chunk_pitch = STEPIFY(chunk_row_bytes, pitch_step);
+
+			uint32_t alloc_offset = 0;
+			uint32_t alloc_size = 0;
+			StagingRequiredAction required_action;
+			Error err = _staging_buffer_allocate(upload_staging_buffers, chunk_pitch * rows, required_alignment, alloc_offset, alloc_size, required_action, false);
+			ERR_FAIL_COND_V(err != OK, err);
+
+			if (!command_buffer_to_texture_copies_vector.is_empty() && required_action == STAGING_REQUIRED_ACTION_FLUSH_AND_STALL_ALL) {
+				if (_texture_make_mutable(texture, p_texture)) {
+					// The texture must be mutable to be used as a copy destination.
+					draw_graph.add_synchronization();
+				}
+
+				// If the staging buffer requires flushing everything, we submit the command early and clear the current vector.
+				draw_graph.add_texture_update(texture->driver_id, texture->draw_tracker, command_buffer_to_texture_copies_vector);
+				command_buffer_to_texture_copies_vector.clear();
+			}
+
+			_staging_buffer_execute_required_action(upload_staging_buffers, required_action);
+
+			uint8_t *write_ptr = upload_staging_buffers.blocks[upload_staging_buffers.current].data_ptr + alloc_offset;
+			const uint8_t *chunk_read_ptr = read_ptr + uint64_t(y) * source_row_pitch + uint64_t(x) * pixel_size;
+			for (uint32_t row = 0; row < rows; row++) {
+				memcpy(write_ptr + uint64_t(row) * chunk_pitch, chunk_read_ptr + uint64_t(row) * source_row_pitch, chunk_row_bytes);
+			}
+
+			RDD::BufferTextureCopyRegion copy_region;
+			copy_region.buffer_offset = alloc_offset;
+			copy_region.row_pitch = chunk_pitch;
+			copy_region.texture_subresource.aspect = texture->read_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) ? RDD::TEXTURE_ASPECT_DEPTH : RDD::TEXTURE_ASPECT_COLOR;
+			copy_region.texture_subresource.mipmap = p_mipmap;
+			copy_region.texture_subresource.layer = p_layer;
+			copy_region.texture_offset = Vector3i(p_region.position.x + int32_t(x), p_region.position.y + int32_t(y), 0);
+			copy_region.texture_region_size = Vector3i(int32_t(columns), int32_t(rows), 1);
+
+			RDG::RecordedBufferToTextureCopy buffer_to_texture_copy;
+			buffer_to_texture_copy.from_buffer = upload_staging_buffers.blocks[upload_staging_buffers.current].driver_id;
+			buffer_to_texture_copy.region = copy_region;
+			command_buffer_to_texture_copies_vector.push_back(buffer_to_texture_copy);
+
+			upload_staging_buffers.blocks.write[upload_staging_buffers.current].fill_amount = alloc_offset + alloc_size;
+		}
+	}
+
+	if (_texture_make_mutable(texture, p_texture)) {
+		// The texture must be mutable to be used as a copy destination.
+		draw_graph.add_synchronization();
+	}
+
+	draw_graph.add_texture_update(texture->driver_id, texture->draw_tracker, command_buffer_to_texture_copies_vector);
+
+	return OK;
+}
+
 void RenderingDevice::_texture_check_shared_fallback(Texture *p_texture) {
 	if (p_texture->shared_fallback == nullptr) {
 		p_texture->shared_fallback = memnew(Texture::SharedFallback);
@@ -9056,6 +9193,7 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("texture_create_from_extension", "type", "format", "samples", "usage_flags", "image", "width", "height", "depth", "layers", "mipmaps"), &RenderingDevice::texture_create_from_extension, DEFVAL(1));
 
 	ClassDB::bind_method(D_METHOD("texture_update", "texture", "layer", "data"), &RenderingDevice::texture_update);
+	ClassDB::bind_method(D_METHOD("texture_update_region", "texture", "layer", "mipmap", "region", "data"), &RenderingDevice::texture_update_region);
 	ClassDB::bind_method(D_METHOD("texture_get_data", "texture", "layer"), &RenderingDevice::texture_get_data);
 	ClassDB::bind_method(D_METHOD("texture_get_data_async", "texture", "layer", "callback"), &RenderingDevice::texture_get_data_async);
 

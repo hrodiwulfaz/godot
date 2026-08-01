@@ -3960,6 +3960,35 @@
 				Returns a ShaderMaterial with the default texture_blit Shader.
 			</description>
 		</method>
+		<method name="texture_drawable_get_generation" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="texture" type="RID" />
+			<description>
+				Returns the drawable resource generation, or [code]0[/code] when [param texture] is not an ordinary drawable texture.
+			</description>
+		</method>
+		<method name="texture_drawable_get_subresource" qualifiers="const">
+			<return type="Image" />
+			<param index="0" name="texture" type="RID" />
+			<param index="1" name="mipmap" type="int" />
+			<param index="2" name="expected_generation" type="int" />
+			<param index="3" name="layer" type="int" default="0" />
+			<description>
+				Reads the exact requested drawable mipmap and layer without regenerating other levels. Returns [code]null[/code] for invalid metadata, a stale generation, or a backend readback format that is unsupported. This diagnostic operation may stall rendering and may transfer more data than the requested mipmap.
+			</description>
+		</method>
+		<method name="texture_drawable_update_subresource">
+			<return type="int" enum="Error" />
+			<param index="0" name="texture" type="RID" />
+			<param index="1" name="image" type="Image" />
+			<param index="2" name="destination_region" type="Rect2i" />
+			<param index="3" name="mipmap" type="int" />
+			<param index="4" name="expected_generation" type="int" />
+			<param index="5" name="layer" type="int" default="0" />
+			<description>
+				Writes all bytes from the one-level [param image] to one exact drawable subresource. The image size and format must exactly match [param destination_region] and the drawable. Invalid bounds, layers, mipmaps, formats, byte counts, or generations leave the texture unchanged.
+			</description>
+		</method>
 		<method name="texture_get_format" qualifiers="const">
 			<return type="int" enum="Image.Format" />
 			<param index="0" name="texture" type="RID" />
