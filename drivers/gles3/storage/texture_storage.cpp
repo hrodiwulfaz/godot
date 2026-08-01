@@ -1262,6 +1262,143 @@ Error TextureStorage::texture_drawable_initialize(RID p_texture, int p_width, in
 	return OK;
 }
 
+Error TextureStorage::texture_drawable_layered_initialize(RID p_texture, int p_width, int p_height, int p_layers, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) {
+	Texture initial_texture;
+	texture_owner.initialize_rid(p_texture, initial_texture);
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_CANT_CREATE);
+
+	ERR_FAIL_COND_V(p_width <= 0 || p_height <= 0 || p_width > 16384 || p_height > 16384, ERR_INVALID_PARAMETER);
+	const int max_layers = texture_drawable_get_max_array_layers();
+	ERR_FAIL_COND_V(p_layers <= 0 || max_layers <= 0 || p_layers > max_layers, ERR_INVALID_PARAMETER);
+
+	Image::Format format;
+	switch (p_format) {
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBA8:
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBA8_SRGB:
+			format = Image::FORMAT_RGBA8;
+			break;
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBAH:
+			format = Image::FORMAT_RGBAH;
+			break;
+		case RSE::TEXTURE_DRAWABLE_FORMAT_RGBAF:
+			format = Image::FORMAT_RGBAF;
+			break;
+		default:
+			return ERR_INVALID_PARAMETER;
+	}
+
+	texture->width = p_width;
+	texture->height = p_height;
+	texture->alloc_width = p_width;
+	texture->alloc_height = p_height;
+	texture->layers = p_layers;
+	texture->mipmaps = p_with_mipmaps ? Image::get_image_required_mipmaps(p_width, p_height, format) + 1 : 1;
+	texture->format = format;
+	texture->drawable_type = p_format;
+	texture->type = Texture::TYPE_LAYERED;
+	texture->layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY;
+	texture->target = GL_TEXTURE_2D_ARRAY;
+	_get_gl_image_and_format(Ref<Image>(), texture->format, texture->real_format, texture->gl_format_cache, texture->gl_internal_format_cache, texture->gl_type_cache, texture->compressed, false);
+	ERR_FAIL_COND_V(texture->compressed || texture->real_format != texture->format, ERR_UNAVAILABLE);
+
+	const int64_t total_data_size = Image::get_image_data_size(texture->width, texture->height, texture->format, p_with_mipmaps) * texture->layers;
+	ERR_FAIL_COND_V(total_data_size <= 0 || total_data_size > UINT32_MAX, ERR_OUT_OF_MEMORY);
+	texture->total_data_size = total_data_size;
+	texture->active = true;
+
+	GLint previous_active_texture = GL_TEXTURE0;
+	GLint previous_binding = 0;
+	GLint previous_read_framebuffer = 0;
+	GLint previous_draw_framebuffer = 0;
+	GLboolean previous_scissor = glIsEnabled(GL_SCISSOR_TEST);
+	GLboolean previous_blend = glIsEnabled(GL_BLEND);
+	GLboolean previous_framebuffer_srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+	GLboolean previous_color_mask[4];
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &previous_binding);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
+	glGetBooleanv(GL_COLOR_WRITEMASK, previous_color_mask);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+
+	glGenTextures(1, &texture->tex_id);
+	if (texture->tex_id == 0) {
+		glBindTexture(GL_TEXTURE_2D_ARRAY, previous_binding);
+		glActiveTexture(previous_active_texture);
+		return ERR_CANT_CREATE;
+	}
+	GLES3::Utilities::get_singleton()->texture_allocated_data(texture->tex_id, texture->total_data_size, "Drawable Texture 2D Array");
+	glBindTexture(GL_TEXTURE_2D_ARRAY, texture->tex_id);
+	if (GLES3::Config::get_singleton()->immutable_texture_storage_supported) {
+		glTexStorage3D(GL_TEXTURE_2D_ARRAY, texture->mipmaps, texture->gl_internal_format_cache, texture->width, texture->height, texture->layers);
+	} else {
+		for (int mipmap = 0; mipmap < texture->mipmaps; mipmap++) {
+			const int mipmap_width = MAX(1, texture->width >> mipmap);
+			const int mipmap_height = MAX(1, texture->height >> mipmap);
+			glTexImage3D(GL_TEXTURE_2D_ARRAY, mipmap, texture->gl_internal_format_cache, mipmap_width, mipmap_height, texture->layers, 0, texture->gl_format_cache, texture->gl_type_cache, nullptr);
+		}
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, texture->mipmaps - 1);
+	}
+	_texture_set_swizzle(texture, texture->real_format);
+	texture->gl_set_filter(texture->mipmaps > 1 ? RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS : RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST);
+	texture->gl_set_repeat(RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	GLuint framebuffer = 0;
+	glGenFramebuffers(1, &framebuffer);
+	const GLfloat clear_color[4] = { p_color.r, p_color.g, p_color.b, p_color.a };
+	bool framebuffer_complete = framebuffer != 0;
+	if (framebuffer_complete) {
+		glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+		glDisable(GL_SCISSOR_TEST);
+		glDisable(GL_BLEND);
+		glDisable(GL_FRAMEBUFFER_SRGB);
+		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		for (int mipmap = 0; mipmap < texture->mipmaps && framebuffer_complete; mipmap++) {
+			for (int layer = 0; layer < texture->layers; layer++) {
+				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture->tex_id, mipmap, layer);
+				if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+					framebuffer_complete = false;
+					break;
+				}
+				glClearBufferfv(GL_COLOR, 0, clear_color);
+			}
+		}
+	}
+
+	glColorMask(previous_color_mask[0], previous_color_mask[1], previous_color_mask[2], previous_color_mask[3]);
+	if (previous_scissor) {
+		glEnable(GL_SCISSOR_TEST);
+	} else {
+		glDisable(GL_SCISSOR_TEST);
+	}
+	if (previous_blend) {
+		glEnable(GL_BLEND);
+	} else {
+		glDisable(GL_BLEND);
+	}
+	if (previous_framebuffer_srgb) {
+		glEnable(GL_FRAMEBUFFER_SRGB);
+	} else {
+		glDisable(GL_FRAMEBUFFER_SRGB);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, previous_read_framebuffer);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previous_draw_framebuffer);
+	if (framebuffer != 0) {
+		glDeleteFramebuffers(1, &framebuffer);
+	}
+	glBindTexture(GL_TEXTURE_2D_ARRAY, previous_binding);
+	glActiveTexture(previous_active_texture);
+	const GLenum gl_error = glGetError();
+	ERR_FAIL_COND_V(!framebuffer_complete || gl_error != GL_NO_ERROR, ERR_CANT_CREATE);
+
+	texture->drawable_generation = 1;
+	return OK;
+}
+
 RID TextureStorage::texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers, RSE::TextureLayeredType p_layered_type) {
 	Texture texture;
 	texture.active = true;
@@ -1512,9 +1649,13 @@ void TextureStorage::texture_drawable_blit_rect(const TypedArray<RID> &p_texture
 Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer) {
 	Texture *texture = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != Texture::TYPE_2D || texture->target != GL_TEXTURE_2D || texture->is_proxy || texture->is_render_target, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->target != GL_TEXTURE_2D && texture->target != GL_TEXTURE_2D_ARRAY) ||
+					(texture->type != Texture::TYPE_2D && (texture->type != Texture::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
-	ERR_FAIL_COND_V(p_layer != 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_layer < 0 || p_layer >= texture->layers, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_image.is_null() || p_image->has_mipmaps(), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_destination_region.position.x < 0 || p_destination_region.position.y < 0, ERR_INVALID_PARAMETER);
@@ -1547,18 +1688,23 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 	GLint previous_unpack_alignment = 4;
 	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
 	glActiveTexture(GL_TEXTURE0);
-	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_binding);
+	glGetIntegerv(texture->target == GL_TEXTURE_2D_ARRAY ? GL_TEXTURE_BINDING_2D_ARRAY : GL_TEXTURE_BINDING_2D, &previous_binding);
 	glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_unpack_alignment);
 	while (glGetError() != GL_NO_ERROR) {
 	}
 
-	glBindTexture(GL_TEXTURE_2D, texture->tex_id);
+	glBindTexture(texture->target, texture->tex_id);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexSubImage2D(GL_TEXTURE_2D, p_mipmap, p_destination_region.position.x, p_destination_region.position.y,
-			p_destination_region.size.x, p_destination_region.size.y, texture->gl_format_cache, texture->gl_type_cache, data.ptr());
+	if (texture->target == GL_TEXTURE_2D_ARRAY) {
+		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, p_mipmap, p_destination_region.position.x, p_destination_region.position.y, p_layer,
+				p_destination_region.size.x, p_destination_region.size.y, 1, texture->gl_format_cache, texture->gl_type_cache, data.ptr());
+	} else {
+		glTexSubImage2D(GL_TEXTURE_2D, p_mipmap, p_destination_region.position.x, p_destination_region.position.y,
+				p_destination_region.size.x, p_destination_region.size.y, texture->gl_format_cache, texture->gl_type_cache, data.ptr());
+	}
 
 	glPixelStorei(GL_UNPACK_ALIGNMENT, previous_unpack_alignment);
-	glBindTexture(GL_TEXTURE_2D, previous_binding);
+	glBindTexture(texture->target, previous_binding);
 	glActiveTexture(previous_active_texture);
 	const GLenum gl_error = glGetError();
 	ERR_FAIL_COND_V(gl_error != GL_NO_ERROR, ERR_CANT_CREATE);
@@ -1567,12 +1713,100 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 	return OK;
 }
 
+Error TextureStorage::texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) {
+	Texture *source = texture_owner.get_or_null(p_source);
+	ERR_FAIL_NULL_V(source, ERR_INVALID_PARAMETER);
+	Texture *destination = texture_owner.get_or_null(p_destination);
+	ERR_FAIL_NULL_V(destination, ERR_INVALID_PARAMETER);
+
+	const bool source_drawable = source->drawable_generation != 0 &&
+			(source->target == GL_TEXTURE_2D || source->target == GL_TEXTURE_2D_ARRAY) &&
+			(source->type == Texture::TYPE_2D || (source->type == Texture::TYPE_LAYERED && source->layered_type == RSE::TEXTURE_LAYERED_2D_ARRAY)) &&
+			!source->is_proxy && !source->is_render_target;
+	const bool destination_drawable = destination->drawable_generation != 0 &&
+			(destination->target == GL_TEXTURE_2D || destination->target == GL_TEXTURE_2D_ARRAY) &&
+			(destination->type == Texture::TYPE_2D || (destination->type == Texture::TYPE_LAYERED && destination->layered_type == RSE::TEXTURE_LAYERED_2D_ARRAY)) &&
+			!destination->is_proxy && !destination->is_render_target;
+	ERR_FAIL_COND_V(!source_drawable || !destination_drawable, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->drawable_generation != p_expected_source_generation || destination->drawable_generation != p_expected_destination_generation, ERR_INVALID_DATA);
+	ERR_FAIL_COND_V(p_source_layer < 0 || p_source_layer >= source->layers || p_destination_layer < 0 || p_destination_layer >= destination->layers, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->width != destination->width ||
+					source->height != destination->height ||
+					source->mipmaps != destination->mipmaps ||
+					source->format != destination->format ||
+					source->real_format != destination->real_format ||
+					source->gl_internal_format_cache != destination->gl_internal_format_cache ||
+					source->drawable_type != destination->drawable_type,
+			ERR_INVALID_PARAMETER);
+
+	if (p_source == p_destination && p_source_layer == p_destination_layer) {
+		return OK;
+	}
+
+	GLint previous_active_texture = GL_TEXTURE0;
+	GLint previous_texture_binding = 0;
+	GLint previous_read_framebuffer = 0;
+	GLint previous_read_buffer = GL_BACK;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(destination->target == GL_TEXTURE_2D_ARRAY ? GL_TEXTURE_BINDING_2D_ARRAY : GL_TEXTURE_BINDING_2D, &previous_texture_binding);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+	glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+
+	GLuint framebuffer = 0;
+	glGenFramebuffers(1, &framebuffer);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+	glReadBuffer(GL_COLOR_ATTACHMENT0);
+	bool framebuffer_complete = framebuffer != 0;
+	for (int mipmap = 0; mipmap < source->mipmaps && framebuffer_complete; mipmap++) {
+		if (source->target == GL_TEXTURE_2D_ARRAY) {
+			glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, source->tex_id, mipmap, p_source_layer);
+		} else {
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source->tex_id, mipmap);
+		}
+		framebuffer_complete = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	}
+
+	glBindTexture(destination->target, destination->tex_id);
+	for (int mipmap = 0; mipmap < source->mipmaps && framebuffer_complete; mipmap++) {
+		const int width = MAX(1, source->width >> mipmap);
+		const int height = MAX(1, source->height >> mipmap);
+		if (source->target == GL_TEXTURE_2D_ARRAY) {
+			glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, source->tex_id, mipmap, p_source_layer);
+		} else {
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source->tex_id, mipmap);
+		}
+		if (destination->target == GL_TEXTURE_2D_ARRAY) {
+			glCopyTexSubImage3D(GL_TEXTURE_2D_ARRAY, mipmap, 0, 0, p_destination_layer, 0, 0, width, height);
+		} else {
+			glCopyTexSubImage2D(GL_TEXTURE_2D, mipmap, 0, 0, 0, 0, width, height);
+		}
+	}
+
+	glBindTexture(destination->target, previous_texture_binding);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, previous_read_framebuffer);
+	glReadBuffer(previous_read_buffer);
+	glDeleteFramebuffers(1, &framebuffer);
+	glActiveTexture(previous_active_texture);
+	const GLenum gl_error = glGetError();
+	ERR_FAIL_COND_V(!framebuffer_complete || gl_error != GL_NO_ERROR, ERR_CANT_CREATE);
+
+	destination->image_cache_2d.unref();
+	return OK;
+}
+
 Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer) const {
 	Texture *texture = texture_owner.get_or_null(p_texture);
 	ERR_FAIL_NULL_V(texture, Ref<Image>());
-	ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->type != Texture::TYPE_2D || texture->target != GL_TEXTURE_2D || texture->is_proxy || texture->is_render_target, Ref<Image>());
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->target != GL_TEXTURE_2D && texture->target != GL_TEXTURE_2D_ARRAY) ||
+					(texture->type != Texture::TYPE_2D && (texture->type != Texture::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			Ref<Image>());
 	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, Ref<Image>());
-	ERR_FAIL_COND_V(p_layer != 0, Ref<Image>());
+	ERR_FAIL_COND_V(p_layer < 0 || p_layer >= texture->layers, Ref<Image>());
 	ERR_FAIL_COND_V(p_mipmap < 0 || p_mipmap >= texture->mipmaps, Ref<Image>());
 	ERR_FAIL_COND_V(texture->real_format != texture->format, Ref<Image>());
 
@@ -1592,14 +1826,16 @@ Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p
 	Vector<uint8_t> data;
 	data.resize(data_size);
 
-	GLint previous_framebuffer = 0;
+	GLint previous_read_framebuffer = 0;
+	GLint previous_draw_framebuffer = 0;
 	GLint previous_active_texture = GL_TEXTURE0;
 	GLint previous_binding = 0;
 	GLint previous_pack_alignment = 4;
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
 	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
 	glActiveTexture(GL_TEXTURE0);
-	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_binding);
+	glGetIntegerv(texture->target == GL_TEXTURE_2D_ARRAY ? GL_TEXTURE_BINDING_2D_ARRAY : GL_TEXTURE_BINDING_2D, &previous_binding);
 	glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
 	while (glGetError() != GL_NO_ERROR) {
 	}
@@ -1607,7 +1843,11 @@ Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p
 	GLuint framebuffer = 0;
 	glGenFramebuffers(1, &framebuffer);
 	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture->tex_id, p_mipmap);
+	if (texture->target == GL_TEXTURE_2D_ARRAY) {
+		glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture->tex_id, p_mipmap, p_layer);
+	} else {
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture->tex_id, p_mipmap);
+	}
 	const GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 	if (framebuffer_status == GL_FRAMEBUFFER_COMPLETE) {
 		glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -1615,9 +1855,10 @@ Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p
 	}
 
 	glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
-	glBindFramebuffer(GL_FRAMEBUFFER, previous_framebuffer);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, previous_read_framebuffer);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previous_draw_framebuffer);
 	glDeleteFramebuffers(1, &framebuffer);
-	glBindTexture(GL_TEXTURE_2D, previous_binding);
+	glBindTexture(texture->target, previous_binding);
 	glActiveTexture(previous_active_texture);
 	const GLenum gl_error = glGetError();
 	ERR_FAIL_COND_V(framebuffer_status != GL_FRAMEBUFFER_COMPLETE || gl_error != GL_NO_ERROR, Ref<Image>());
@@ -1627,10 +1868,25 @@ Ref<Image> TextureStorage::texture_drawable_get_subresource(RID p_texture, int p
 
 uint64_t TextureStorage::texture_drawable_get_generation(RID p_texture) const {
 	const Texture *texture = texture_owner.get_or_null(p_texture);
-	if (texture == nullptr || texture->is_proxy || texture->type != Texture::TYPE_2D) {
+	if (texture == nullptr || texture->is_proxy ||
+			(texture->type != Texture::TYPE_2D && (texture->type != Texture::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY))) {
 		return 0;
 	}
 	return texture->drawable_generation;
+}
+
+int TextureStorage::texture_drawable_get_max_array_layers() const {
+	return MAX(0, GLES3::Config::get_singleton()->max_texture_array_layers);
+}
+
+bool TextureStorage::texture_drawable_is_layered(RID p_texture) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	return texture != nullptr &&
+			texture->drawable_generation != 0 &&
+			!texture->is_proxy &&
+			texture->type == Texture::TYPE_LAYERED &&
+			texture->layered_type == RSE::TEXTURE_LAYERED_2D_ARRAY &&
+			texture->target == GL_TEXTURE_2D_ARRAY;
 }
 
 void TextureStorage::texture_2d_placeholder_initialize(RID p_texture) {

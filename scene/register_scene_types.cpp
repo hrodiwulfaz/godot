@@ -128,6 +128,7 @@
 #include "scene/resources/compressed_texture_resource_format.h"
 #include "scene/resources/curve_texture.h"
 #include "scene/resources/drawable_texture_2d.h"
+#include "scene/resources/drawable_texture_2d_array.h"
 #include "scene/resources/environment.h"
 #include "scene/resources/external_texture.h"
 #include "scene/resources/font.h"
@@ -954,6 +955,7 @@ void register_scene_types() {
 	GDREGISTER_CLASS(CameraTexture);
 	GDREGISTER_CLASS(ExternalTexture);
 	GDREGISTER_CLASS(DrawableTexture2D);
+	GDREGISTER_CLASS(DrawableTexture2DArray);
 	GDREGISTER_CLASS(CanvasTexturePageView);
 	GDREGISTER_VIRTUAL_CLASS(TextureLayered);
 	GDREGISTER_ABSTRACT_CLASS(ImageTextureLayered);

@@ -113,6 +113,7 @@ public:
 	virtual RID texture_external_create(int p_width, int p_height, uint64_t p_external_buffer = 0) = 0;
 	virtual RID texture_proxy_create(RID p_base) = 0;
 	virtual RID texture_drawable_create(int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color = Color(1, 1, 1, 1), bool p_with_mipmaps = false) = 0;
+	virtual RID texture_drawable_layered_create(int p_width, int p_height, int p_layers, RSE::TextureDrawableFormat p_format, const Color &p_color = Color(0, 0, 0, 0), bool p_with_mipmaps = false) = 0;
 
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) = 0;
 
@@ -123,8 +124,10 @@ public:
 
 	virtual void texture_drawable_blit_rect(const TypedArray<RID> &p_textures, const Rect2i &p_rect, RID p_material, const Color &p_modulate, const TypedArray<RID> &p_source_textures, int p_to_mipmap = 0) = 0;
 	virtual Error texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) = 0;
+	virtual Error texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) = 0;
 	virtual Ref<Image> texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) const = 0;
 	virtual uint64_t texture_drawable_get_generation(RID p_texture) const = 0;
+	virtual int texture_drawable_get_max_array_layers() const = 0;
 
 	// These two APIs can be used together or in combination with the others.
 	virtual RID texture_2d_placeholder_create() = 0;

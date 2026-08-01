@@ -37,6 +37,7 @@ TEST_FORCE_LINK(test_drawable_texture_2d)
 #include "core/templates/safe_refcount.h"
 #include "scene/resources/canvas_texture_page_view.h"
 #include "scene/resources/drawable_texture_2d.h"
+#include "scene/resources/drawable_texture_2d_array.h"
 #include "scene/resources/image_texture.h"
 #include "servers/rendering/renderer_canvas_render.h"
 #include "servers/rendering/rendering_server.h"
@@ -302,6 +303,23 @@ TEST_CASE("[SceneTree][DrawableTexture2D] proxy commands preserve base contract 
 	CHECK(RS::get_singleton()->texture_drawable_update_subresource(texture_rid, upload, Rect2i(0, 0, 2, 2), 1, generation, 0) == OK);
 	RS::get_singleton()->texture_drawable_generate_mipmaps(texture_rid);
 	CHECK(RS::get_singleton()->texture_drawable_get_subresource(texture_rid, 1, generation, 0).is_valid());
+}
+
+TEST_CASE("[SceneTree][DrawableTexture2DArray] dummy capability is deterministic") {
+	CHECK(RS::get_singleton()->texture_drawable_get_max_array_layers() == 0);
+
+	Ref<DrawableTexture2DArray> texture;
+	texture.instantiate();
+	ERR_PRINT_OFF;
+	CHECK(texture->setup(8, 8, 2, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == ERR_CANT_CREATE);
+	ERR_PRINT_ON;
+	CHECK(texture->get_rid().is_null());
+	CHECK(texture->get_width() == 0);
+	CHECK(texture->get_height() == 0);
+	CHECK(texture->get_layers() == 0);
+	CHECK_FALSE(texture->has_mipmaps());
+	CHECK(texture->get_generation() == 0);
+	CHECK(texture->get_layered_type() == TextureLayered::LAYERED_TYPE_2D_ARRAY);
 }
 
 TEST_CASE("[SceneTree][CanvasTexturePageView] immutable logical adapter and fallback") {
