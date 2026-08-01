@@ -1739,7 +1739,7 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 	}
 
 	// preallocate slots for uniform set 3
-	state.batch_texture_uniforms.resize(4);
+	state.batch_texture_uniforms.resize(5);
 
 	{ //shader variants
 
@@ -2415,20 +2415,25 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				const bool page_owned = texture_storage->owns_texture(rect->texture);
 				const Size2i page_size = page_owned ? texture_storage->texture_2d_get_size(rect->texture) : Size2i();
 				const int page_mipmap_count = page_owned ? texture_storage->texture_get_mipmap_count(rect->texture) : 0;
-				const bool page_kind_valid = page_owned && texture_storage->texture_get_type(rect->texture) == RendererRD::TextureStorage::TYPE_2D;
+				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
+				const bool page_kind_valid = page_owned &&
+						(array_requested
+										? texture_storage->texture_drawable_is_layered(rect->texture) &&
+												rect->array_layer < uint32_t(texture_storage->texture_get_layers(rect->texture))
+										: texture_storage->texture_get_type(rect->texture) == RendererRD::TextureStorage::TYPE_2D &&
+												rect->array_layer == 0);
 				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid(page_size, page_mipmap_count);
 				const bool page_generation_valid = page_owned &&
 						texture_storage->texture_drawable_get_generation(rect->texture) == rect->expected_generation;
 				const bool anisotropic_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC ||
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
-				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
 				const bool use_page = page_geometry_valid &&
 						page_generation_valid &&
-						!array_requested &&
 						r_current_batch->material.is_null() &&
 						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
 						!anisotropic_filter &&
 						!bool(rect->flags & CANVAS_RECT_CLIP_UV);
+				const bool use_texture_array = use_page && array_requested;
 
 				if (page_owned && !page_geometry_valid) {
 					ERR_PRINT_ONCE("CanvasTexturePageView physical metadata is malformed. Drawing its ordinary fallback.");
@@ -2491,11 +2496,13 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				const bool region_mip_nearest = use_page && mipmapped_filter && use_nearest_mipmap_filter;
 				const bool region_mip_trilinear = use_page && mipmapped_filter && !use_nearest_mipmap_filter;
 				const float batch_region_mipmap_bias = use_page ? region_mipmap_bias : 0.0f;
-				if (r_current_batch->use_region_sampling != use_page ||
+				if (r_current_batch->use_texture_array != use_texture_array ||
+						r_current_batch->use_region_sampling != use_page ||
 						r_current_batch->region_mip_nearest != region_mip_nearest ||
 						r_current_batch->region_mip_trilinear != region_mip_trilinear ||
 						r_current_batch->region_mipmap_bias != batch_region_mipmap_bias) {
 					r_current_batch = _new_batch(r_batch_broken);
+					r_current_batch->use_texture_array = use_texture_array;
 					r_current_batch->use_region_sampling = use_page;
 					r_current_batch->region_mip_nearest = region_mip_nearest;
 					r_current_batch->region_mip_trilinear = region_mip_trilinear;
@@ -2556,6 +2563,9 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 					instance_data->array_layer = rect->array_layer;
 					instance_data->max_region_lod = rect->max_region_lod;
 					instance_data->flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
+					if (use_texture_array) {
+						instance_data->flags |= INSTANCE_FLAGS_USE_ARRAY_LAYER;
+					}
 				}
 
 				_add_to_batch(r_batch_broken, r_current_batch);
@@ -3174,7 +3184,9 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 			uniform_ptrw[1] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_batch->tex_info->normal);
 			uniform_ptrw[2] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_batch->tex_info->specular);
 			uniform_ptrw[3] = RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, p_batch->tex_info->sampler);
+			uniform_ptrw[4] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 4, p_batch->tex_info->diffuse_array);
 
+			// QUAD owns this shared set, so its set 3 layout must remain compatible with QUAD_PAGE.
 			RID rid = RD::get_singleton()->uniform_set_create(state.batch_texture_uniforms, shader.default_version_rd_shader, BATCH_UNIFORM_SET);
 			ERR_FAIL_COND_MSG(rid.is_null(), "Failed to create uniform set for batch.");
 
@@ -3211,6 +3223,7 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	pipeline_key.shader_specialization.use_msdf = p_batch->use_msdf;
 	pipeline_key.shader_specialization.use_lcd = p_batch->use_lcd;
 	const bool is_page_batch = p_batch->command_type == Item::Command::TYPE_TEXTURE_PAGE_RECT;
+	pipeline_key.shader_specialization.use_texture_array = is_page_batch && p_batch->use_texture_array;
 	pipeline_key.shader_specialization.use_region_sampling = is_page_batch && p_batch->use_region_sampling;
 	pipeline_key.shader_specialization.region_mip_nearest = is_page_batch && p_batch->region_mip_nearest;
 	pipeline_key.shader_specialization.region_mip_trilinear = is_page_batch && p_batch->region_mip_trilinear;
@@ -3478,8 +3491,9 @@ void RendererCanvasRenderRD::_prepare_batch_texture_info(RID p_texture, TextureS
 		p_texture = default_canvas_texture;
 	}
 
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::TextureStorage::CanvasTextureInfo info =
-			RendererRD::TextureStorage::get_singleton()->canvas_texture_get_info(
+			texture_storage->canvas_texture_get_info(
 					p_texture,
 					p_state.texture_filter(),
 					p_state.texture_repeat(),
@@ -3492,7 +3506,9 @@ void RendererCanvasRenderRD::_prepare_batch_texture_info(RID p_texture, TextureS
 	}
 
 	p_info->state = p_state;
-	p_info->diffuse = info.diffuse;
+	const bool use_texture_array = texture_storage->texture_drawable_is_layered(p_texture);
+	p_info->diffuse = use_texture_array ? texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE) : info.diffuse;
+	p_info->diffuse_array = use_texture_array ? info.diffuse : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	p_info->normal = info.normal;
 	p_info->specular = info.specular;
 	p_info->sampler = info.sampler;

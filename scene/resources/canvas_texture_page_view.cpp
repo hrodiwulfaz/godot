@@ -32,20 +32,25 @@
 
 #include "core/object/class_db.h"
 #include "scene/resources/drawable_texture_2d.h"
+#include "scene/resources/drawable_texture_2d_array.h"
 #include "servers/rendering/rendering_server.h"
 
 Error CanvasTexturePageView::configure(const Ref<Texture> &p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, const Ref<Texture2D> &p_fallback_texture) {
 	ERR_FAIL_COND_V(configured, ERR_ALREADY_IN_USE);
 	ERR_FAIL_COND_V(p_page_texture.is_null(), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_physical_region.position.x < 0 || p_physical_region.position.y < 0 || p_physical_region.size.x <= 0 || p_physical_region.size.y <= 0, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(p_array_layer != 0 || p_max_region_lod > 30 || p_expected_generation == 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_max_region_lod > 30 || p_expected_generation == 0, ERR_INVALID_PARAMETER);
 
 	Ref<DrawableTexture2D> drawable = p_page_texture;
-	ERR_FAIL_COND_V(drawable.is_null(), ERR_UNAVAILABLE);
-	const int page_width = drawable->get_width();
-	const int page_height = drawable->get_height();
-	const RID page_rid = drawable->get_rid();
-	const int page_mipmap_count = drawable->get_use_mipmaps() ? Image::get_image_required_mipmaps(page_width, page_height, drawable->get_format()) + 1 : 1;
+	Ref<DrawableTexture2DArray> drawable_array = p_page_texture;
+	ERR_FAIL_COND_V(drawable.is_null() && drawable_array.is_null(), ERR_UNAVAILABLE);
+	const int page_width = drawable.is_valid() ? drawable->get_width() : drawable_array->get_width();
+	const int page_height = drawable.is_valid() ? drawable->get_height() : drawable_array->get_height();
+	const bool page_has_mipmaps = drawable.is_valid() ? drawable->get_use_mipmaps() : drawable_array->has_mipmaps();
+	const Image::Format page_format = drawable.is_valid() ? drawable->get_format() : drawable_array->get_format();
+	const RID page_rid = drawable.is_valid() ? drawable->get_rid() : drawable_array->get_rid();
+	const int page_mipmap_count = page_has_mipmaps ? Image::get_image_required_mipmaps(page_width, page_height, page_format) + 1 : 1;
+	ERR_FAIL_COND_V(drawable.is_valid() ? p_array_layer != 0 : p_array_layer >= uint32_t(drawable_array->get_layers()), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_physical_region.get_end().x > page_width || p_physical_region.get_end().y > page_height, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_max_region_lod >= uint32_t(page_mipmap_count), ERR_INVALID_PARAMETER);
 	if (p_fallback_texture.is_valid()) {

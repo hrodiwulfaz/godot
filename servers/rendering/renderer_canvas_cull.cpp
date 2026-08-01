@@ -1725,6 +1725,9 @@ void RendererCanvasCull::canvas_item_add_texture_page_rect_region(RID p_item, co
 	rect->fallback_texture = p_fallback_texture;
 	rect->fallback_source = p_fallback_source;
 	rect->flags = RendererCanvasRender::CANVAS_RECT_REGION | RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING;
+	if (RSG::texture_storage->texture_drawable_is_layered(p_page_texture)) {
+		rect->flags |= RendererCanvasRender::CANVAS_RECT_ARRAY_LAYER;
+	}
 
 	if (p_rect.size.x < 0) {
 		rect->flags |= RendererCanvasRender::CANVAS_RECT_FLIP_H;
