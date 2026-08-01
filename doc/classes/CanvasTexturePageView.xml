@@ -4,7 +4,7 @@
 		An immutable logical view into an isolated region of a drawable texture page.
 	</brief_description>
 	<description>
-		[CanvasTexturePageView] maps ordinary [Texture2D] drawing to one independently mipmapped region of a physical drawable page. Its logical dimensions are stored independently from an optional fallback. Direct RID and image access return the fallback, or an invalid RID and [code]null[/code] image when none is supplied, so unsupported consumers never bind the physical page as an ordinary logical texture.
+		[CanvasTexturePageView] maps ordinary [Texture2D] drawing to one independently mipmapped region of a physical drawable page. The page may be an ordinary [DrawableTexture2D] or one layer of a [DrawableTexture2DArray]. Its logical dimensions are stored independently from an optional fallback. Direct RID and image access return the fallback, or an invalid RID and [code]null[/code] image when none is supplied, so unsupported consumers never bind a physical page or array RID as an ordinary logical texture.
 		Configure a new view before publishing it. Published views are immutable; replace the view held by an outer [AtlasTexture] when placement or generation changes.
 	</description>
 	<tutorials>
@@ -21,7 +21,7 @@
 			<description>
 				Configures this view once. [param physical_region] defines the logical size and must fit the drawable page. Its position and size, and both page axes, must be aligned for every level through [param max_region_lod]. The requested LOD must exist in the page's actual mip chain, and [param expected_generation] must match the current drawable generation.
 				[param fallback_texture] is optional. A same-sized fallback preserves exact ordinary-texture access; a smaller shared transparent fallback is scaled to the logical source domain. Without a fallback, unsupported or stale draws remain transparent while preserving the logical layout.
-				This Pass-A resource accepts an ordinary [DrawableTexture2D] with [param array_layer] equal to [code]0[/code]. Unsupported or stale configurations return a non-[constant @GlobalScope.OK] result without changing the view.
+				For an ordinary [DrawableTexture2D], [param array_layer] must be [code]0[/code]. For a [DrawableTexture2DArray], it selects one valid array layer. Unsupported, stale, or repeated configurations return a non-[constant @GlobalScope.OK] result without changing the view.
 			</description>
 		</method>
 	</methods>

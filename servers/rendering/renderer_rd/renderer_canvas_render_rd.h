@@ -480,6 +480,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	struct TextureInfo {
 		TextureState state;
 		RID diffuse;
+		RID diffuse_array;
 		RID normal;
 		RID specular;
 		RID sampler;
@@ -554,6 +555,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		bool use_lighting = false;
 		bool use_msdf = false;
 		bool use_lcd = false;
+		bool use_texture_array = false;
 		bool use_region_sampling = false;
 		bool region_mip_nearest = false;
 		bool region_mip_trilinear = false;

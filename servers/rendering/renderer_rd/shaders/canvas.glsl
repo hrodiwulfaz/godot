@@ -584,8 +584,22 @@ float msdf_median(float r, float g, float b) {
 	return max(min(r, g), min(max(r, g), b));
 }
 
-vec4 sample_isolated_page_2d(vec2 p_uv_unclamped, vec4 p_sampler_domain, uint p_max_region_lod) {
-	vec2 page_size = vec2(textureSize(sampler2D(color_texture, texture_sampler), 0));
+vec2 page_texture_size() {
+	if (sc_use_texture_array()) {
+		return vec2(textureSize(sampler2DArray(color_texture_array, texture_sampler), 0).xy);
+	}
+	return vec2(textureSize(sampler2D(color_texture, texture_sampler), 0));
+}
+
+vec4 sample_page_texture_lod(vec2 p_uv, uint p_array_layer, float p_lod) {
+	if (sc_use_texture_array()) {
+		return textureLod(sampler2DArray(color_texture_array, texture_sampler), vec3(p_uv, float(p_array_layer)), p_lod);
+	}
+	return textureLod(sampler2D(color_texture, texture_sampler), p_uv, p_lod);
+}
+
+vec4 sample_isolated_page_2d(vec2 p_uv_unclamped, vec4 p_sampler_domain, uint p_array_layer, uint p_max_region_lod) {
+	vec2 page_size = page_texture_size();
 	vec2 gradient_x = dFdx(p_uv_unclamped) * page_size;
 	vec2 gradient_y = dFdy(p_uv_unclamped) * page_size;
 	float lambda = 0.5 * log2(max(max(dot(gradient_x, gradient_x), dot(gradient_y, gradient_y)), 1e-8)) + params.region_mipmap_bias;
@@ -595,7 +609,7 @@ vec4 sample_isolated_page_2d(vec2 p_uv_unclamped, vec4 p_sampler_domain, uint p_
 		float level = floor(lod + 0.5);
 		vec2 half_texel = vec2(0.5 * exp2(level)) / page_size;
 		vec2 sample_uv = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel, p_sampler_domain.xy + p_sampler_domain.zw - half_texel);
-		return textureLod(sampler2D(color_texture, texture_sampler), sample_uv, level);
+		return sample_page_texture_lod(sample_uv, p_array_layer, level);
 	}
 	if (sc_region_mip_trilinear()) {
 		float level_0 = floor(lod);
@@ -604,14 +618,14 @@ vec4 sample_isolated_page_2d(vec2 p_uv_unclamped, vec4 p_sampler_domain, uint p_
 		vec2 half_texel_1 = vec2(0.5 * exp2(level_1)) / page_size;
 		vec2 sample_uv_0 = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel_0, p_sampler_domain.xy + p_sampler_domain.zw - half_texel_0);
 		vec2 sample_uv_1 = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel_1, p_sampler_domain.xy + p_sampler_domain.zw - half_texel_1);
-		vec4 sample_0 = textureLod(sampler2D(color_texture, texture_sampler), sample_uv_0, level_0);
-		vec4 sample_1 = textureLod(sampler2D(color_texture, texture_sampler), sample_uv_1, level_1);
+		vec4 sample_0 = sample_page_texture_lod(sample_uv_0, p_array_layer, level_0);
+		vec4 sample_1 = sample_page_texture_lod(sample_uv_1, p_array_layer, level_1);
 		return mix(sample_0, sample_1, fract(lod));
 	}
 
 	vec2 half_texel = vec2(0.5) / page_size;
 	vec2 sample_uv = clamp(p_uv_unclamped, p_sampler_domain.xy + half_texel, p_sampler_domain.xy + p_sampler_domain.zw - half_texel);
-	return textureLod(sampler2D(color_texture, texture_sampler), sample_uv, 0.0);
+	return sample_page_texture_lod(sample_uv, p_array_layer, 0.0);
 }
 
 void main() {
@@ -685,14 +699,18 @@ void main() {
 	}
 #ifdef USE_PAGE_RECT
 	else if (sc_use_region_sampling() && bool(read_draw_data_flags & INSTANCE_FLAGS_USE_REGION_SAMPLING)) {
-		color *= sample_isolated_page_2d(uv, read_draw_data_sampler_domain, read_draw_data_max_region_lod);
+		color *= sample_isolated_page_2d(uv, read_draw_data_sampler_domain, read_draw_data_array_layer, read_draw_data_max_region_lod);
 	}
 #endif
 	else {
 #else
 	{
 #endif
+#ifdef USE_PAGE_RECT
+		color *= sample_page_texture_lod(uv, read_draw_data_array_layer, 0.0);
+#else
 		color *= texture(sampler2D(color_texture, texture_sampler), uv);
+#endif
 	}
 
 	uint light_count = read_draw_data_flags & 15u; //max 15 lights
