@@ -47,27 +47,53 @@ DrawableTexture2D::~DrawableTexture2D() {
 }
 
 // Initialize Texture Resource with a call to rendering server. Overwrite existing.
-void DrawableTexture2D::_initialize() {
-	if (texture.is_valid()) {
-		RID new_texture = RS::get_singleton()->texture_drawable_create(width, height, (RSE::TextureDrawableFormat)format, base_color, mipmaps);
-		RS::get_singleton()->texture_replace(texture, new_texture);
-	} else {
-		texture = RS::get_singleton()->texture_drawable_create(width, height, (RSE::TextureDrawableFormat)format, base_color, mipmaps);
+Error DrawableTexture2D::_initialize(int p_width, int p_height, DrawableFormat p_format, const Color &p_color, bool p_use_mipmaps) {
+	RID candidate = RS::get_singleton()->texture_drawable_create(p_width, p_height, (RSE::TextureDrawableFormat)p_format, p_color, p_use_mipmaps);
+	if (candidate.is_null()) {
+		return ERR_CANT_CREATE;
 	}
+	const uint64_t candidate_generation = RS::get_singleton()->texture_drawable_get_generation(candidate);
+	if (candidate_generation != 1) {
+		RS::get_singleton()->free_rid(candidate);
+		return ERR_CANT_CREATE;
+	}
+
+	if (texture.is_valid()) {
+		const uint64_t previous_generation = RS::get_singleton()->texture_drawable_get_generation(texture);
+		RS::get_singleton()->texture_replace(texture, candidate);
+		const uint64_t expected_generation = previous_generation == 0 ? 1 : (previous_generation == UINT64_MAX ? UINT64_MAX : previous_generation + 1);
+		if (RS::get_singleton()->texture_drawable_get_generation(texture) != expected_generation) {
+			return ERR_CANT_CREATE;
+		}
+	} else {
+		texture = candidate;
+	}
+	return OK;
 }
 
 // Setup basic parameters on the Drawable Texture
-void DrawableTexture2D::setup(int p_width, int p_height, DrawableFormat p_format, const Color &p_color, bool p_use_mipmaps) {
-	ERR_FAIL_COND_MSG(p_width <= 0 || p_width > 16384, "Texture dimensions have to be in the 1 to 16384 range.");
-	ERR_FAIL_COND_MSG(p_height <= 0 || p_height > 16384, "Texture dimensions have to be in the 1 to 16384 range.");
+Error DrawableTexture2D::setup_checked(int p_width, int p_height, DrawableFormat p_format, const Color &p_color, bool p_use_mipmaps) {
+	ERR_FAIL_COND_V_MSG(p_width <= 0 || p_width > 16384, ERR_INVALID_PARAMETER, "Texture dimensions have to be in the 1 to 16384 range.");
+	ERR_FAIL_COND_V_MSG(p_height <= 0 || p_height > 16384, ERR_INVALID_PARAMETER, "Texture dimensions have to be in the 1 to 16384 range.");
+	ERR_FAIL_COND_V(p_format < DRAWABLE_FORMAT_RGBA8 || p_format > DRAWABLE_FORMAT_RGBAF, ERR_INVALID_PARAMETER);
+
+	Error error = _initialize(p_width, p_height, p_format, p_color, p_use_mipmaps);
+	if (error != OK) {
+		return error;
+	}
 	width = p_width;
 	height = p_height;
 	format = p_format;
 	mipmaps = p_use_mipmaps;
 	base_color = p_color;
-	_initialize();
 	notify_property_list_changed();
 	emit_changed();
+	return OK;
+}
+
+void DrawableTexture2D::setup(int p_width, int p_height, DrawableFormat p_format, const Color &p_color, bool p_use_mipmaps) {
+	const Error error = setup_checked(p_width, p_height, p_format, p_color, p_use_mipmaps);
+	ERR_FAIL_COND_MSG(error != OK, "Unable to set up DrawableTexture2D.");
 }
 
 int DrawableTexture2D::get_width() const {
@@ -233,6 +259,7 @@ void DrawableTexture2D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_use_mipmaps", "mipmaps"), &DrawableTexture2D::set_use_mipmaps);
 	ClassDB::bind_method(D_METHOD("get_use_mipmaps"), &DrawableTexture2D::get_use_mipmaps);
 
+	ClassDB::bind_method(D_METHOD("setup_checked", "width", "height", "format", "color", "use_mipmaps"), &DrawableTexture2D::setup_checked, DEFVAL(Color(0, 0, 0, 0)), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("setup", "width", "height", "format", "color", "use_mipmaps"), &DrawableTexture2D::setup, DEFVAL(Color(1, 1, 1, 1)), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("blit_rect", "rect", "source", "modulate", "mipmap", "material"), &DrawableTexture2D::blit_rect, DEFVAL(Color(1, 1, 1, 1)), DEFVAL(0), DEFVAL(Ref<Material>()));
 	ClassDB::bind_method(D_METHOD("blit_rect_multi", "rect", "sources", "extra_targets", "modulate", "mipmap", "material"), &DrawableTexture2D::blit_rect_multi, DEFVAL(Color(1, 1, 1, 1)), DEFVAL(0), DEFVAL(Ref<Material>()));

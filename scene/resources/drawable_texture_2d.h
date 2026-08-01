@@ -57,7 +57,7 @@ private:
 
 	RID default_material;
 
-	void _initialize();
+	Error _initialize(int p_width, int p_height, DrawableFormat p_format, const Color &p_color, bool p_use_mipmaps);
 
 protected:
 	static void _bind_methods();
@@ -78,6 +78,7 @@ public:
 	virtual void draw_rect(RID p_canvas_item, const Rect2 &p_rect, bool p_tile = false, const Color &p_modulate = Color(1, 1, 1), bool p_transpose = false) const override;
 	virtual void draw_rect_region(RID p_canvas_item, const Rect2 &p_rect, const Rect2 &p_src_rect, const Color &p_modulate = Color(1, 1, 1), bool p_transpose = false, bool p_clip_uv = true) const override;
 
+	Error setup_checked(int p_width, int p_height, DrawableFormat p_format, const Color &p_color = Color(0, 0, 0, 0), bool p_use_mipmaps = false);
 	void setup(int p_width, int p_height, DrawableFormat p_format, const Color &p_modulate = Color(1, 1, 1, 1), bool p_use_mipmaps = false);
 
 	void blit_rect(const Rect2i p_rect, const Ref<Texture2D> &p_source, const Color &p_modulate = Color(1, 1, 1, 1), int p_mipmap = 0, const Ref<Material> &p_material = Ref<Material>());

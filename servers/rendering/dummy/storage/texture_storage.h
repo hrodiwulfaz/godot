@@ -41,6 +41,9 @@ private:
 
 	struct DummyTexture {
 		Ref<Image> image;
+		Vector<Ref<Image>> drawable_mips;
+		uint64_t drawable_generation = 0;
+		Image::Format drawable_format = Image::FORMAT_MAX;
 	};
 	mutable RID_PtrOwner<DummyTexture> texture_owner;
 
@@ -84,12 +87,47 @@ public:
 		DummyTexture *t = texture_owner.get_or_null(p_texture);
 		ERR_FAIL_NULL(t);
 		t->image = p_image->duplicate();
+		t->drawable_mips.clear();
+		t->drawable_generation = 0;
+		t->drawable_format = Image::FORMAT_MAX;
 	}
 	virtual void texture_2d_layered_initialize(RID p_texture, const Vector<Ref<Image>> &p_layers, RSE::TextureLayeredType p_layered_type) override {}
 	virtual void texture_3d_initialize(RID p_texture, Image::Format, int p_width, int p_height, int p_depth, bool p_mipmaps, const Vector<Ref<Image>> &p_data) override {}
 	virtual void texture_external_initialize(RID p_texture, int p_width, int p_height, uint64_t p_external_buffer) override {}
 	virtual void texture_proxy_initialize(RID p_texture, RID p_base) override {} //all slices, then all the mipmaps, must be coherent
-	virtual void texture_drawable_initialize(RID p_texture, int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) override {}
+	virtual Error texture_drawable_initialize(RID p_texture, int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) override {
+		DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		ERR_FAIL_NULL_V(texture, ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(p_width <= 0 || p_height <= 0 || p_width > 16384 || p_height > 16384, ERR_INVALID_PARAMETER);
+
+		Image::Format format;
+		switch (p_format) {
+			case RSE::TEXTURE_DRAWABLE_FORMAT_RGBA8:
+			case RSE::TEXTURE_DRAWABLE_FORMAT_RGBA8_SRGB:
+				format = Image::FORMAT_RGBA8;
+				break;
+			case RSE::TEXTURE_DRAWABLE_FORMAT_RGBAH:
+				format = Image::FORMAT_RGBAH;
+				break;
+			case RSE::TEXTURE_DRAWABLE_FORMAT_RGBAF:
+				format = Image::FORMAT_RGBAF;
+				break;
+			default:
+				return ERR_INVALID_PARAMETER;
+		}
+
+		Ref<Image> image = Image::create_empty(p_width, p_height, p_with_mipmaps, format);
+		ERR_FAIL_COND_V(image.is_null(), ERR_CANT_CREATE);
+		image->fill(p_color);
+		texture->image = image;
+		texture->drawable_mips.clear();
+		for (int mipmap = 0; mipmap <= image->get_mipmap_count(); mipmap++) {
+			texture->drawable_mips.push_back(image->get_image_from_mipmap(mipmap));
+		}
+		texture->drawable_generation = 1;
+		texture->drawable_format = format;
+		return OK;
+	}
 
 	virtual RID texture_create_from_native_handle(RSE::TextureType p_type, Image::Format p_format, uint64_t p_native_handle, int p_width, int p_height, int p_depth, int p_layers = 1, RSE::TextureLayeredType p_layered_type = RSE::TEXTURE_LAYERED_2D_ARRAY) override { return RID(); }
 
@@ -99,6 +137,35 @@ public:
 	virtual void texture_proxy_update(RID p_proxy, RID p_base) override {}
 
 	virtual void texture_drawable_blit_rect(const TypedArray<RID> &p_textures, const Rect2i &p_rect, RID p_material, const Color &p_modulate, const TypedArray<RID> &p_source_textures, int p_to_mipmap) override {}
+	virtual Error texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) override {
+		DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+		ERR_FAIL_COND_V(p_layer != 0 || p_mipmap < 0 || p_mipmap >= texture->drawable_mips.size(), ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(p_image.is_null() || p_image->has_mipmaps(), ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(p_destination_region.position.x < 0 || p_destination_region.position.y < 0 || p_destination_region.size.x <= 0 || p_destination_region.size.y <= 0, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(p_image->get_size() != p_destination_region.size, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(p_image->get_format() != texture->drawable_format, ERR_INVALID_DATA);
+
+		Ref<Image> destination = texture->drawable_mips[p_mipmap];
+		ERR_FAIL_COND_V(p_destination_region.get_end().x > destination->get_width() || p_destination_region.get_end().y > destination->get_height(), ERR_INVALID_PARAMETER);
+		destination->blit_rect(p_image, Rect2i(Vector2i(), p_image->get_size()), p_destination_region.position);
+		if (p_mipmap == 0) {
+			texture->image = destination;
+		}
+		return OK;
+	}
+	virtual Ref<Image> texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) const override {
+		const DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		ERR_FAIL_NULL_V(texture, Ref<Image>());
+		ERR_FAIL_COND_V(texture->drawable_generation == 0 || texture->drawable_generation != p_expected_generation, Ref<Image>());
+		ERR_FAIL_COND_V(p_layer != 0 || p_mipmap < 0 || p_mipmap >= texture->drawable_mips.size(), Ref<Image>());
+		return texture->drawable_mips[p_mipmap]->duplicate();
+	}
+	virtual uint64_t texture_drawable_get_generation(RID p_texture) const override {
+		const DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		return texture == nullptr ? 0 : texture->drawable_generation;
+	}
 
 	//these two APIs can be used together or in combination with the others.
 	virtual void texture_2d_placeholder_initialize(RID p_texture) override {}
@@ -116,7 +183,18 @@ public:
 	virtual void texture_drawable_generate_mipmaps(RID p_texture) override {}
 	virtual RID texture_drawable_get_default_material() const override { return RID(); }
 
-	virtual void texture_replace(RID p_texture, RID p_by_texture) override { texture_free(p_by_texture); }
+	virtual void texture_replace(RID p_texture, RID p_by_texture) override {
+		DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		DummyTexture *replacement = texture_owner.get_or_null(p_by_texture);
+		ERR_FAIL_NULL(texture);
+		ERR_FAIL_NULL(replacement);
+		const uint64_t previous_generation = texture->drawable_generation;
+		*texture = *replacement;
+		if (previous_generation != 0 && texture->drawable_generation != 0) {
+			texture->drawable_generation = previous_generation == UINT64_MAX ? UINT64_MAX : previous_generation + 1;
+		}
+		texture_free(p_by_texture);
+	}
 	virtual void texture_set_size_override(RID p_texture, int p_width, int p_height) override {}
 
 	virtual void texture_set_path(RID p_texture, const String &p_path) override {}
