@@ -1125,6 +1125,17 @@
 				[b]Note:[/b] [param from_texture] and [param to_texture] must be of the same type (color or depth).
 			</description>
 		</method>
+		<method name="texture_copy_layer">
+			<return type="int" enum="Error" />
+			<param index="0" name="source" type="RID" />
+			<param index="1" name="destination" type="RID" />
+			<param index="2" name="source_layer" type="int" />
+			<param index="3" name="destination_layer" type="int" />
+			<description>
+				Copies every mipmap from [param source_layer] to [param destination_layer] without filtering or conversion. The source and destination must be single-sampled 2D or 2D-array textures with identical dimensions, depth, format, mipmap count, and aspect. Both layers must be in range.
+				[param source] requires [constant TEXTURE_USAGE_CAN_COPY_FROM_BIT], [param destination] requires [constant TEXTURE_USAGE_CAN_COPY_TO_BIT], and neither texture may be bound by an active draw list. Validation completes before any mipmap is submitted. Returns [constant @GlobalScope.OK] when the complete layer copy is accepted, otherwise [constant @GlobalScope.ERR_INVALID_PARAMETER] or [constant @GlobalScope.ERR_UNAVAILABLE].
+			</description>
+		</method>
 		<method name="texture_create">
 			<return type="RID" />
 			<param index="0" name="format" type="RDTextureFormat" />

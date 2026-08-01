@@ -3174,6 +3174,44 @@ Error RenderingDevice::texture_copy(RID p_from_texture, RID p_to_texture, const 
 	return OK;
 }
 
+Error RenderingDevice::texture_copy_layer(RID p_source, RID p_destination, uint32_t p_source_layer, uint32_t p_destination_layer) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+
+	Texture *source = texture_owner.get_or_null(p_source);
+	ERR_FAIL_NULL_V(source, ERR_INVALID_PARAMETER);
+	Texture *destination = texture_owner.get_or_null(p_destination);
+	ERR_FAIL_NULL_V(destination, ERR_INVALID_PARAMETER);
+
+	ERR_FAIL_COND_V(source->bound || destination->bound, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!(source->usage_flags & TEXTURE_USAGE_CAN_COPY_FROM_BIT), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!(destination->usage_flags & TEXTURE_USAGE_CAN_COPY_TO_BIT), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->samples != TEXTURE_SAMPLES_1 || destination->samples != TEXTURE_SAMPLES_1, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->type != TEXTURE_TYPE_2D && source->type != TEXTURE_TYPE_2D_ARRAY, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(destination->type != TEXTURE_TYPE_2D && destination->type != TEXTURE_TYPE_2D_ARRAY, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_source_layer >= source->layers || p_destination_layer >= destination->layers, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(source->format != destination->format ||
+					source->width != destination->width ||
+					source->height != destination->height ||
+					source->depth != destination->depth ||
+					source->mipmaps != destination->mipmaps ||
+					source->read_aspect_flags != destination->read_aspect_flags,
+			ERR_INVALID_PARAMETER);
+
+	if (p_source == p_destination && p_source_layer == p_destination_layer) {
+		return OK;
+	}
+
+	for (uint32_t mipmap = 0; mipmap < source->mipmaps; mipmap++) {
+		const Vector3 size(MAX(1u, source->width >> mipmap), MAX(1u, source->height >> mipmap), MAX(1u, source->depth >> mipmap));
+		const Error error = texture_copy(p_source, p_destination, Vector3(), Vector3(), size, mipmap, mipmap, p_source_layer, p_destination_layer);
+		if (error != OK) {
+			return error;
+		}
+	}
+
+	return OK;
+}
+
 Error RenderingDevice::texture_resolve_multisample(RID p_from_texture, RID p_to_texture) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
@@ -9206,6 +9244,7 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("texture_is_discardable", "texture"), &RenderingDevice::texture_is_discardable);
 
 	ClassDB::bind_method(D_METHOD("texture_copy", "from_texture", "to_texture", "from_pos", "to_pos", "size", "src_mipmap", "dst_mipmap", "src_layer", "dst_layer"), &RenderingDevice::texture_copy);
+	ClassDB::bind_method(D_METHOD("texture_copy_layer", "source", "destination", "source_layer", "destination_layer"), &RenderingDevice::texture_copy_layer);
 	ClassDB::bind_method(D_METHOD("texture_clear", "texture", "color", "base_mipmap", "mipmap_count", "base_layer", "layer_count"), &RenderingDevice::texture_clear);
 	ClassDB::bind_method(D_METHOD("texture_resolve_multisample", "from_texture", "to_texture"), &RenderingDevice::texture_resolve_multisample);
 

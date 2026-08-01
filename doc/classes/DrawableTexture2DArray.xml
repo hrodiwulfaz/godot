@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="DrawableTexture2DArray" inherits="TextureLayered" api_type="core" experimental="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		A drawable 2D texture array with independently addressable layers and mipmaps.
+	</brief_description>
+	<description>
+		[DrawableTexture2DArray] owns one physical drawable 2D-array texture. Every layer has the same dimensions, format, and mipmap count. Call [method setup] once before using the resource, then use the [code]texture_drawable_*[/code] methods on [RenderingServer] for exact layer and mipmap updates, copies, and readback.
+		[method TextureLayered.get_layer_data] returns the complete stored mip chain, including independently uploaded lower levels. This diagnostic operation may stall rendering and perform repeated full-layer transfers; avoid it in normal runtime paths. Float-format readback may return [code]null[/code] on Compatibility backends that do not support the required framebuffer read format.
+		The returned RID is a layered texture RID. It must only be used by consumers that explicitly support texture arrays, such as [CanvasTexturePageView]; never bind it where an ordinary [Texture2D] RID is expected. Replace the resource with a newly configured instance when its capacity or profile changes.
+		Array mipmaps must be supplied explicitly with exact subresource updates or layer copies. Array RIDs are unsupported by [method RenderingServer.texture_drawable_blit_rect] and [method RenderingServer.texture_drawable_generate_mipmaps].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_generation" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the physical drawable generation. A successfully configured resource begins at generation [code]1[/code]; an unconfigured resource returns [code]0[/code].
+			</description>
+		</method>
+		<method name="setup">
+			<return type="int" enum="Error" />
+			<param index="0" name="width" type="int" />
+			<param index="1" name="height" type="int" />
+			<param index="2" name="layers" type="int" />
+			<param index="3" name="format" type="int" enum="DrawableTexture2D.DrawableFormat" />
+			<param index="4" name="color" type="Color" default="Color(0, 0, 0, 0)" />
+			<param index="5" name="use_mipmaps" type="bool" default="false" />
+			<description>
+				Synchronously allocates the physical array and initializes every layer and mipmap to [param color]. [param layers] must not exceed [method RenderingServer.texture_drawable_get_max_array_layers].
+				Configuration is one-shot. A second call returns [constant @GlobalScope.ERR_ALREADY_IN_USE]. Invalid parameters or backend allocation failures return a non-[constant @GlobalScope.OK] result and leave the resource unconfigured.
+			</description>
+		</method>
+	</methods>
+</class>
