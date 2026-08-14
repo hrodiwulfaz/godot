@@ -420,6 +420,10 @@ float texture_shadow(vec4 p) {
 
 #ifdef LIGHT_CODE_USED
 
+// Declared before the light code, which may read the picture's page too.
+vec4 texture_page(vec2 p_uv);
+vec4 texture_page_lod(vec2 p_uv, float p_lod);
+
 vec4 light_compute(
 		vec3 light_vertex,
 		vec3 light_position,
@@ -628,6 +632,35 @@ vec4 sample_isolated_page_2d(vec2 p_uv_unclamped, vec4 p_sampler_domain, uint p_
 	return sample_page_texture_lod(sample_uv, p_array_layer, 0.0);
 }
 
+// texture_page() and texture_page_lod() read the drawn picture's own texture: its cell of the page array for page
+// rectangles, sampled like the rectangle itself, TEXTURE otherwise.
+#ifdef USE_PAGE_RECT
+vec4 texture_page(vec2 p_uv) {
+	if (sc_use_region_sampling() && bool(read_draw_data_flags & INSTANCE_FLAGS_USE_REGION_SAMPLING)) {
+		return sample_isolated_page_2d(p_uv, read_draw_data_sampler_domain, read_draw_data_array_layer, read_draw_data_max_region_lod);
+	}
+	return sample_page_texture_lod(p_uv, read_draw_data_array_layer, 0.0);
+}
+
+vec4 texture_page_lod(vec2 p_uv, float p_lod) {
+	if (sc_use_region_sampling() && bool(read_draw_data_flags & INSTANCE_FLAGS_USE_REGION_SAMPLING)) {
+		float level = clamp(p_lod, 0.0, float(read_draw_data_max_region_lod));
+		vec2 half_texel = vec2(0.5 * exp2(ceil(level))) / page_texture_size();
+		vec4 domain = read_draw_data_sampler_domain;
+		return sample_page_texture_lod(clamp(p_uv, domain.xy + half_texel, domain.xy + domain.zw - half_texel), read_draw_data_array_layer, level);
+	}
+	return sample_page_texture_lod(p_uv, read_draw_data_array_layer, p_lod);
+}
+#else
+vec4 texture_page(vec2 p_uv) {
+	return texture(sampler2D(color_texture, texture_sampler), p_uv);
+}
+
+vec4 texture_page_lod(vec2 p_uv, float p_lod) {
+	return textureLod(sampler2D(color_texture, texture_sampler), p_uv, p_lod);
+}
+#endif
+
 void main() {
 	vec4 color = color_interp;
 	vec2 uv = uv_vertex_interp.xy;
@@ -641,6 +674,11 @@ void main() {
 	vec4 region_rect = src_rect;
 #else
 	vec4 region_rect = vec4(0.0, 0.0, 1.0 / read_draw_data_color_texture_pixel_size);
+#endif
+#if defined(USE_PAGE_RECT) || (!defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE))
+	vec4 page_region = vec4(min(src_rect.xy, src_rect.xy + src_rect.zw), abs(src_rect.zw));
+#else
+	vec4 page_region = vec4(0.0, 0.0, 1.0, 1.0);
 #endif
 
 #if !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE)

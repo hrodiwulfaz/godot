@@ -1230,6 +1230,9 @@ MaterialStorage::MaterialStorage() {
 		actions.renames["texture_sdf_normal"] = "texture_sdf_normal";
 		actions.renames["sdf_to_screen_uv"] = "sdf_to_screen_uv";
 		actions.renames["screen_uv_to_sdf"] = "screen_uv_to_sdf";
+		actions.renames["texture_page"] = "texture_page";
+		actions.renames["texture_page_lod"] = "texture_page_lod";
+		actions.renames["PAGE_REGION"] = "page_region";
 
 		actions.usage_defines["COLOR"] = "#define COLOR_USED\n";
 		actions.usage_defines["SCREEN_UV"] = "#define SCREEN_UV_USED\n";

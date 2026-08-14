@@ -5,6 +5,7 @@
 	</brief_description>
 	<description>
 		[CanvasTexturePageView] maps ordinary [Texture2D] drawing to one independently mipmapped region of a physical drawable page. The page may be an ordinary [DrawableTexture2D] or one layer of a [DrawableTexture2DArray]. Its logical dimensions are stored independently from an optional fallback. Direct RID and image access return the fallback, or an invalid RID and [code]null[/code] image when none is supplied, so unsupported consumers never bind a physical page or array RID as an ordinary logical texture.
+		Compatible canvas materials may modify the already sampled [code]COLOR[/code] or sample their own uniform textures. They must not re-sample page data through the built-in [code]TEXTURE[/code], [code]UV[/code], or [code]REGION_RECT[/code] values. Layered page data is not exposed through the ordinary 2D [code]TEXTURE[/code] binding.
 		Configure a new view before publishing it. Published views are immutable; replace the view held by an outer [AtlasTexture] when placement or generation changes.
 	</description>
 	<tutorials>

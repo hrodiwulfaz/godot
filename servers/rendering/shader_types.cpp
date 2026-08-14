@@ -305,6 +305,7 @@ ShaderTypes::ShaderTypes() {
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["SPECULAR_SHININESS"] = constt(ShaderLanguage::TYPE_VEC4);
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["SCREEN_UV"] = constt(ShaderLanguage::TYPE_VEC2);
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["REGION_RECT"] = constt(ShaderLanguage::TYPE_VEC4);
+	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["PAGE_REGION"] = constt(ShaderLanguage::TYPE_VEC4);
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["SCREEN_PIXEL_SIZE"] = constt(ShaderLanguage::TYPE_VEC2);
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["POINT_COORD"] = constt(ShaderLanguage::TYPE_VEC2);
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].built_ins["AT_LIGHT_PASS"] = constt(ShaderLanguage::TYPE_BOOL);
@@ -332,6 +333,18 @@ ShaderTypes::ShaderTypes() {
 		func.return_type = ShaderLanguage::TYPE_VEC2; //whether it could emit
 		shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].stage_functions["screen_uv_to_sdf"] = func;
 		shader_modes[RSE::SHADER_CANVAS_ITEM].functions["light"].stage_functions["screen_uv_to_sdf"] = func;
+	}
+
+	{
+		ShaderLanguage::StageFunctionInfo func;
+		func.skip_function = "vertex";
+		func.arguments.push_back(ShaderLanguage::StageFunctionInfo::Argument("uv", ShaderLanguage::TYPE_VEC2));
+		func.return_type = ShaderLanguage::TYPE_VEC4;
+		shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].stage_functions["texture_page"] = func;
+		shader_modes[RSE::SHADER_CANVAS_ITEM].functions["light"].stage_functions["texture_page"] = func;
+		func.arguments.push_back(ShaderLanguage::StageFunctionInfo::Argument("lod", ShaderLanguage::TYPE_FLOAT));
+		shader_modes[RSE::SHADER_CANVAS_ITEM].functions["fragment"].stage_functions["texture_page_lod"] = func;
+		shader_modes[RSE::SHADER_CANVAS_ITEM].functions["light"].stage_functions["texture_page_lod"] = func;
 	}
 
 	shader_modes[RSE::SHADER_CANVAS_ITEM].functions["light"].built_ins["FRAGCOORD"] = constt(ShaderLanguage::TYPE_VEC4);

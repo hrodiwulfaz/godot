@@ -1855,6 +1855,9 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 		actions.renames["texture_sdf_normal"] = "texture_sdf_normal";
 		actions.renames["sdf_to_screen_uv"] = "sdf_to_screen_uv";
 		actions.renames["screen_uv_to_sdf"] = "screen_uv_to_sdf";
+		actions.renames["texture_page"] = "texture_page";
+		actions.renames["texture_page_lod"] = "texture_page_lod";
+		actions.renames["PAGE_REGION"] = "page_region";
 
 		actions.usage_defines["COLOR"] = "#define COLOR_USED\n";
 		actions.usage_defines["SCREEN_UV"] = "#define SCREEN_UV_USED\n";
@@ -2461,7 +2464,6 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
 				const bool use_page = page_geometry_valid &&
 						page_generation_valid &&
-						r_current_batch->material.is_null() &&
 						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
 						!anisotropic_filter &&
 						!bool(rect->flags & CANVAS_RECT_CLIP_UV);

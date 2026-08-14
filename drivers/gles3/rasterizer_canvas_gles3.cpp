@@ -993,7 +993,6 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
 				const bool use_page = page_geometry_valid &&
 						page_generation_valid &&
-						state.canvas_instance_batches[state.current_batch_index].material.is_null() &&
 						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
 						!anisotropic_filter &&
 						!bool(rect->flags & CANVAS_RECT_CLIP_UV);
