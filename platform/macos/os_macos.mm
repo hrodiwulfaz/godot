@@ -374,6 +374,27 @@ void OS_MacOS::alert(const String &p_alert, const String &p_title) {
 	}
 }
 
+OS::ConfirmationResult OS_MacOS::show_confirmation(const String &p_message, const String &p_title) {
+	NSAlert *window = [[NSAlert alloc] init];
+	NSString *ns_title = [NSString stringWithUTF8String:p_title.utf8().get_data()];
+	NSString *ns_message = [NSString stringWithUTF8String:p_message.utf8().get_data()];
+
+	NSTextField *text_field = [NSTextField labelWithString:ns_message];
+	[text_field setAlignment:NSTextAlignmentCenter];
+	[window addButtonWithTitle:@"Cancel"];
+	[window addButtonWithTitle:@"OK"];
+	[window setMessageText:ns_title];
+	[window setAccessoryView:text_field];
+	[window setAlertStyle:NSAlertStyleWarning];
+
+	id key_window = [[NSApplication sharedApplication] keyWindow];
+	const NSModalResponse result = [window runModal];
+	if (key_window) {
+		[key_window makeKeyAndOrderFront:nil];
+	}
+	return result == NSAlertSecondButtonReturn ? CONFIRMATION_RESULT_OK : CONFIRMATION_RESULT_CANCEL;
+}
+
 _FORCE_INLINE_ String OS_MacOS::get_framework_executable(const String &p_path) {
 	Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
 

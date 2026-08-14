@@ -166,6 +166,82 @@ void OS_LinuxBSD::alert(const String &p_alert, const String &p_title) {
 	}
 }
 
+OS::ConfirmationResult OS_LinuxBSD::show_confirmation(const String &p_message, const String &p_title) {
+	const char *message_programs[] = { "zenity", "kdialog", "Xdialog", "xmessage" };
+	const Vector<String> path_elems = get_environment("PATH").split(":", false);
+	String program;
+
+	for (const String &path : path_elems) {
+		for (uint64_t i = 0; i < std_size(message_programs); i++) {
+			const String tested_path = path.path_join(message_programs[i]);
+			if (FileAccess::exists(tested_path)) {
+				program = tested_path;
+				break;
+			}
+		}
+		if (!program.is_empty()) {
+			break;
+		}
+	}
+
+	if (program.is_empty()) {
+		return CONFIRMATION_RESULT_UNAVAILABLE;
+	}
+
+	List<String> args;
+	if (program.ends_with("zenity")) {
+		args.push_back("--question");
+		args.push_back("--default-cancel");
+		args.push_back("--width");
+		args.push_back("500");
+		args.push_back("--title");
+		args.push_back(p_title);
+		args.push_back("--text");
+		args.push_back(p_message);
+		args.push_back("--ok-label");
+		args.push_back("OK");
+		args.push_back("--cancel-label");
+		args.push_back("Cancel");
+	} else if (program.ends_with("kdialog")) {
+		args.push_back("--warningyesno");
+		args.push_back(p_message);
+		args.push_back("--title");
+		args.push_back(p_title);
+		args.push_back("--yes-label");
+		args.push_back("OK");
+		args.push_back("--no-label");
+		args.push_back("Cancel");
+		args.push_back("--defaultno");
+	} else if (program.ends_with("Xdialog")) {
+		args.push_back("--title");
+		args.push_back(p_title);
+		args.push_back("--default-no");
+		args.push_back("--yes-label");
+		args.push_back("OK");
+		args.push_back("--no-label");
+		args.push_back("Cancel");
+		args.push_back("--yesno");
+		args.push_back(p_message);
+		args.push_back("0");
+		args.push_back("0");
+	} else {
+		args.push_back("-center");
+		args.push_back("-title");
+		args.push_back(p_title);
+		args.push_back("-buttons");
+		args.push_back("OK:0,Cancel:1");
+		args.push_back("-default");
+		args.push_back("Cancel");
+		args.push_back(p_message);
+	}
+
+	int exit_code = 1;
+	if (execute(program, args, nullptr, &exit_code) != OK) {
+		return CONFIRMATION_RESULT_UNAVAILABLE;
+	}
+	return exit_code == 0 ? CONFIRMATION_RESULT_OK : CONFIRMATION_RESULT_CANCEL;
+}
+
 void OS_LinuxBSD::initialize() {
 	crash_handler.initialize();
 

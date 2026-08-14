@@ -154,6 +154,10 @@ void OS::alert(const String &p_alert, const String &p_title) {
 	fprintf(stderr, "%s: %s\n", p_title.utf8().get_data(), p_alert.utf8().get_data());
 }
 
+OS::ConfirmationResult OS::show_confirmation(const String &, const String &) {
+	return CONFIRMATION_RESULT_UNAVAILABLE;
+}
+
 void OS::set_low_processor_usage_mode(bool p_enabled) {
 	low_processor_usage_mode = p_enabled;
 }
@@ -461,6 +465,37 @@ void OS::ensure_user_data_dir() {
 	Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
 	Error err = da->make_dir_recursive(dd);
 	ERR_FAIL_COND_MSG(err != OK, vformat("Error attempting to create data dir: %s.", dd));
+}
+
+Error OS::probe_user_data_dir_write(const String &p_directory, String *r_probe_path) const {
+	uint32_t suffix = 0;
+	String probe_path;
+	do {
+		probe_path = p_directory.path_join(vformat(".godot-write-test-%d-%d-%d", get_process_id(), get_ticks_usec(), suffix));
+		suffix++;
+	} while (FileAccess::exists(probe_path) || DirAccess::exists(probe_path));
+
+	if (r_probe_path) {
+		*r_probe_path = probe_path;
+	}
+
+	Error open_error = OK;
+	Ref<FileAccess> probe = FileAccess::open(probe_path, FileAccess::WRITE, &open_error);
+	if (probe.is_null()) {
+		return open_error != OK ? open_error : ERR_FILE_CANT_OPEN;
+	}
+
+	static const uint8_t probe_contents[] = { 'G', 'o', 'd', 'o', 't', ' ', 'w', 'r', 'i', 't', 'e', ' ', 'p', 'r', 'o', 'b', 'e' };
+	const bool write_succeeded = probe->store_buffer(probe_contents, std_size(probe_contents));
+	const Error write_error = probe->get_error();
+	probe->close();
+	DirAccess::remove_absolute(probe_path);
+
+	if (!write_succeeded || write_error != OK) {
+		return write_error != OK ? write_error : ERR_FILE_CANT_WRITE;
+	}
+
+	return OK;
 }
 
 String OS::get_model_name() const {
