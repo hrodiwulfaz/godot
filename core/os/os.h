@@ -74,6 +74,12 @@ public:
 		PLATFORM_STRING_FILE_MANAGER_SHOW,
 	};
 
+	enum ConfirmationResult {
+		CONFIRMATION_RESULT_OK,
+		CONFIRMATION_RESULT_CANCEL,
+		CONFIRMATION_RESULT_UNAVAILABLE,
+	};
+
 private:
 	static OS *singleton;
 	static uint64_t target_ticks;
@@ -197,6 +203,7 @@ public:
 	virtual Rect2 calculate_boot_screen_rect(const Size2 &p_window_size, const Size2 &p_imgrect_size) const;
 
 	virtual void alert(const String &p_alert, const String &p_title = "ALERT!");
+	virtual ConfirmationResult show_confirmation(const String &p_message, const String &p_title);
 
 	struct GDExtensionData {
 		bool also_set_library_path = false;
@@ -257,6 +264,7 @@ public:
 	bool is_hidpi_allowed() const { return _allow_hidpi; }
 
 	void ensure_user_data_dir();
+	Error probe_user_data_dir_write(const String &p_directory, String *r_probe_path = nullptr) const;
 
 	// NOTE: MainLoop is forward-declared in OS and should be included to use this.
 	virtual MainLoop *get_main_loop() const = 0;

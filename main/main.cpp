@@ -2244,6 +2244,22 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	// The recovery-mode lock is the first user-data consumer for editor startup.
 	OS::get_singleton()->ensure_user_data_dir();
 
+	if (OS::get_singleton()->is_portable_mode() && OS::get_singleton()->get_user_data_dir_override().is_empty()) {
+		const String user_data_dir = OS::get_singleton()->get_user_data_dir();
+		const Error probe_error = OS::get_singleton()->probe_user_data_dir_write(user_data_dir);
+		if (probe_error != OK) {
+			const String warning = vformat(
+					"Portable user data directory is not writable:\n%s\n\nTechnical error: %s (%d)\n\nGodot may be unable to save editor settings, project metadata, logs, imported data, game saves, and other user data. Move this portable installation to a writable directory, correct the directory permissions, or start Godot with --user-data-dir <writable-directory>.\n\nSelect OK to continue anyway, or Cancel to exit.",
+					user_data_dir, error_names[probe_error], probe_error);
+			WARN_PRINT(warning);
+
+			if (display_driver != NULL_DISPLAY_DRIVER && !ProjectSettings::get_singleton()->has_custom_feature("dedicated_server") && OS::get_singleton()->show_confirmation(warning, "Portable user data directory is not writable") == OS::CONFIRMATION_RESULT_CANCEL) {
+				exit_err = ERR_FILE_CANT_WRITE;
+				goto error;
+			}
+		}
+	}
+
 #ifdef TOOLS_ENABLED
 	if (editor) {
 		Engine::get_singleton()->set_editor_hint(true);
