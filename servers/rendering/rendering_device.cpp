@@ -33,6 +33,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/core_globals.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
@@ -8855,15 +8856,20 @@ template <typename T>
 void RenderingDevice::_free_rids(T &p_owner, const char *p_type) {
 	LocalVector<RID> owned = p_owner.get_owned_list();
 	if (owned.size()) {
-		if (owned.size() == 1) {
-			WARN_PRINT(vformat("1 RID of type \"%s\" was leaked.", p_type));
+		const String message = owned.size() == 1 ? vformat("1 RID of type \"%s\" was leaked.", p_type) : vformat("%d RIDs of type \"%s\" were leaked.", owned.size(), p_type);
+		if (CoreGlobals::print_ready) {
+			WARN_PRINT(message);
 		} else {
-			WARN_PRINT(vformat("%d RIDs of type \"%s\" were leaked.", owned.size(), p_type));
+			WARN_VERBOSE(message);
 		}
 		for (const RID &rid : owned) {
 #ifdef DEV_ENABLED
 			if (resource_names.has(rid)) {
-				print_line(String(" - ") + resource_names[rid]);
+				if (CoreGlobals::print_ready) {
+					print_line(String(" - ") + resource_names[rid]);
+				} else {
+					print_verbose(String(" - ") + resource_names[rid]);
+				}
 			}
 #endif
 			free_rid(rid);
@@ -9069,10 +9075,11 @@ void RenderingDevice::finalize() {
 		// For textures it's a bit more difficult because they may be shared.
 		LocalVector<RID> owned = texture_owner.get_owned_list();
 		if (owned.size()) {
-			if (owned.size() == 1) {
-				WARN_PRINT("1 RID of type \"Texture\" was leaked.");
+			const String message = owned.size() == 1 ? String("1 RID of type \"Texture\" was leaked.") : vformat("%d RIDs of type \"Texture\" were leaked.", owned.size());
+			if (CoreGlobals::print_ready) {
+				WARN_PRINT(message);
 			} else {
-				WARN_PRINT(vformat("%d RIDs of type \"Texture\" were leaked.", owned.size()));
+				WARN_VERBOSE(message);
 			}
 			LocalVector<RID> owned_non_shared;
 			// Free shared first.
@@ -9080,7 +9087,11 @@ void RenderingDevice::finalize() {
 				if (texture_is_shared(texture_rid)) {
 #ifdef DEV_ENABLED
 					if (resource_names.has(texture_rid)) {
-						print_line(String(" - ") + resource_names[texture_rid]);
+						if (CoreGlobals::print_ready) {
+							print_line(String(" - ") + resource_names[texture_rid]);
+						} else {
+							print_verbose(String(" - ") + resource_names[texture_rid]);
+						}
 					}
 #endif
 					free_rid(texture_rid);
@@ -9092,7 +9103,11 @@ void RenderingDevice::finalize() {
 			for (const RID &texture_rid : owned_non_shared) {
 #ifdef DEV_ENABLED
 				if (resource_names.has(texture_rid)) {
-					print_line(String(" - ") + resource_names[texture_rid]);
+					if (CoreGlobals::print_ready) {
+						print_line(String(" - ") + resource_names[texture_rid]);
+					} else {
+						print_verbose(String(" - ") + resource_names[texture_rid]);
+					}
 				}
 #endif
 				free_rid(texture_rid);

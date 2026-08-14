@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/core_globals.h"
 #include "core/os/memory.h"
 #include "core/os/mutex.h"
 #include "core/string/print_string.h"
@@ -427,8 +428,10 @@ public:
 		}
 
 		if (alloc_count) {
-			print_error(vformat("ERROR: %d RID allocations of type '%s' were leaked at exit.",
-					alloc_count, description ? description : typeid(T).name()));
+			if (CoreGlobals::print_ready || is_print_verbose_enabled()) {
+				print_error(vformat("ERROR: %d RID allocations of type '%s' were leaked at exit.",
+						alloc_count, description ? description : typeid(T).name()));
+			}
 
 			for (size_t i = 0; i < max_alloc; i++) {
 				uint32_t validator = chunks[i / elements_in_chunk][i % elements_in_chunk].validator;

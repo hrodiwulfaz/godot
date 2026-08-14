@@ -30,6 +30,7 @@
 
 #include "resource.h"
 
+#include "core/core_globals.h"
 #include "core/io/resource_loader.h"
 #include "core/math/math_funcs.h"
 #include "core/math/random_pcg.h"
@@ -818,7 +819,7 @@ void ResourceCache::clear() {
 			for (const KeyValue<String, Resource *> &E : resources) {
 				print_line(vformat("Resource still in use: %s (%s)", E.key, E.value->get_class()));
 			}
-		} else {
+		} else if (CoreGlobals::print_ready) {
 			ERR_PRINT(vformat("%d resources still in use at exit (run with --verbose for details).", resources.size()));
 		}
 	}

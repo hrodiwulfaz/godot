@@ -32,6 +32,7 @@
 #include "object.compat.inc"
 
 #include "core/config/engine.h"
+#include "core/core_globals.h"
 #include "core/extension/gdextension_manager.h"
 #include "core/io/resource.h"
 #include "core/object/class_db.h"
@@ -2533,7 +2534,12 @@ void ObjectDB::cleanup() {
 	spin_lock.lock();
 
 	if (slot_count > 0) {
-		WARN_PRINT(vformat("%d ObjectDB %s leaked at exit (run with `--verbose` for details).", slot_count, slot_count == 1 ? "instance was" : "instances were"));
+		const String message = vformat("%d ObjectDB %s leaked at exit (run with `--verbose` for details).", slot_count, slot_count == 1 ? "instance was" : "instances were");
+		if (CoreGlobals::print_ready) {
+			WARN_PRINT(message);
+		} else {
+			WARN_VERBOSE(message);
+		}
 		if (OS::get_singleton()->is_stdout_verbose()) {
 			// Ensure calling the native classes because if a leaked instance has a script
 			// that overrides any of those methods, it'd not be OK to call them at this point,
