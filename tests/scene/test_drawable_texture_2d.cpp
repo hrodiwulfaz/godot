@@ -74,6 +74,45 @@ static void check_region(const Ref<Image> &p_readback, const Rect2i &p_region, c
 	}
 }
 
+static Error update_subresources(RID p_texture, uint64_t p_generation, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers) {
+	return RS::get_singleton()->texture_drawable_update_subresources(p_texture, p_images, p_regions, p_mipmaps, p_layers, p_generation);
+}
+
+static void check_rejected_batch(RID p_texture, uint64_t p_generation, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, Error p_expected_error, uint64_t p_submitted_generation = 0) {
+	const Ref<Image> before_base = RS::get_singleton()->texture_drawable_get_subresource(p_texture, 0, p_generation, 0);
+	const Ref<Image> before_mipmap = RS::get_singleton()->texture_drawable_get_subresource(p_texture, 1, p_generation, 0);
+	REQUIRE(before_base.is_valid());
+	REQUIRE(before_mipmap.is_valid());
+
+	ERR_PRINT_OFF;
+	const Error error = update_subresources(p_texture, p_submitted_generation == 0 ? p_generation : p_submitted_generation, p_images, p_regions, p_mipmaps, p_layers);
+	ERR_PRINT_ON;
+	CHECK(error == p_expected_error);
+
+	const Ref<Image> after_base = RS::get_singleton()->texture_drawable_get_subresource(p_texture, 0, p_generation, 0);
+	const Ref<Image> after_mipmap = RS::get_singleton()->texture_drawable_get_subresource(p_texture, 1, p_generation, 0);
+	REQUIRE(after_base.is_valid());
+	REQUIRE(after_mipmap.is_valid());
+	CHECK(after_base->get_data() == before_base->get_data());
+	CHECK(after_mipmap->get_data() == before_mipmap->get_data());
+}
+
+static void check_rejected_second_write(RID p_texture, uint64_t p_generation, const Ref<Image> &p_image, const Rect2i &p_region, int p_mipmap, int p_layer, Error p_expected_error) {
+	TypedArray<Image> images;
+	images.push_back(make_rgba8_image(Size2i(2, 2), 181));
+	images.push_back(p_image);
+	TypedArray<Rect2i> regions;
+	regions.push_back(Rect2i(0, 0, 2, 2));
+	regions.push_back(p_region);
+	PackedInt32Array mipmaps;
+	mipmaps.push_back(0);
+	mipmaps.push_back(p_mipmap);
+	PackedInt32Array layers;
+	layers.push_back(0);
+	layers.push_back(p_layer);
+	check_rejected_batch(p_texture, p_generation, images, regions, mipmaps, layers, p_expected_error);
+}
+
 static const Point2i STRESS_SOURCE_ORIGINS[5] = {
 	Point2i(0, 0),
 	Point2i(1024, 0),
@@ -213,6 +252,154 @@ TEST_CASE("[SceneTree][DrawableTexture2D] exact subresource writes and readback"
 		CHECK_FALSE(readback->has_mipmaps());
 		check_region(readback, regions[mipmap], upload);
 	}
+}
+
+TEST_CASE("[SceneTree][DrawableTexture2D] batched exact writes update disjoint regions, mipmaps, and untouched bytes") {
+	Ref<DrawableTexture2D> texture;
+	texture.instantiate();
+	REQUIRE(texture->setup_checked(8, 8, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == OK);
+	const RID rid = texture->get_rid();
+	const uint64_t generation = RS::get_singleton()->texture_drawable_get_generation(rid);
+
+	const Ref<Image> base_first = make_rgba8_image(Size2i(3, 2), 11);
+	const Ref<Image> mip_write = make_rgba8_image(Size2i(2, 2), 47);
+	const Ref<Image> base_second = make_rgba8_image(Size2i(2, 1), 89);
+	TypedArray<Image> images;
+	images.push_back(base_first);
+	images.push_back(mip_write);
+	images.push_back(base_second);
+	TypedArray<Rect2i> regions;
+	regions.push_back(Rect2i(1, 2, 3, 2));
+	regions.push_back(Rect2i(1, 1, 2, 2));
+	regions.push_back(Rect2i(5, 3, 2, 1));
+	PackedInt32Array mipmaps;
+	mipmaps.push_back(0);
+	mipmaps.push_back(1);
+	mipmaps.push_back(0);
+	PackedInt32Array layers;
+	layers.push_back(0);
+	layers.push_back(0);
+	layers.push_back(0);
+
+	CHECK(update_subresources(rid, generation, images, regions, mipmaps, layers) == OK);
+
+	Ref<Image> expected_base = Image::create_empty(8, 8, false, Image::FORMAT_RGBA8);
+	expected_base->blit_rect(base_first, Rect2i(Vector2i(), base_first->get_size()), Point2i(1, 2));
+	expected_base->blit_rect(base_second, Rect2i(Vector2i(), base_second->get_size()), Point2i(5, 3));
+	const Ref<Image> actual_base = RS::get_singleton()->texture_drawable_get_subresource(rid, 0, generation, 0);
+	REQUIRE(actual_base.is_valid());
+	CHECK(actual_base->get_data() == expected_base->get_data());
+
+	Ref<Image> expected_mipmap = Image::create_empty(4, 4, false, Image::FORMAT_RGBA8);
+	expected_mipmap->blit_rect(mip_write, Rect2i(Vector2i(), mip_write->get_size()), Point2i(1, 1));
+	const Ref<Image> actual_mipmap = RS::get_singleton()->texture_drawable_get_subresource(rid, 1, generation, 0);
+	REQUIRE(actual_mipmap.is_valid());
+	CHECK(actual_mipmap->get_data() == expected_mipmap->get_data());
+}
+
+TEST_CASE("[SceneTree][DrawableTexture2D] invalid batched writes are all-or-nothing") {
+	Ref<DrawableTexture2D> texture;
+	texture.instantiate();
+	REQUIRE(texture->setup_checked(8, 8, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == OK);
+	const RID rid = texture->get_rid();
+	const uint64_t generation = RS::get_singleton()->texture_drawable_get_generation(rid);
+	const Ref<Image> valid = make_rgba8_image(Size2i(2, 2), 131);
+
+	check_rejected_second_write(rid, generation, Ref<Image>(), Rect2i(0, 0, 2, 2), 0, 0, ERR_INVALID_PARAMETER);
+	Ref<Image> empty;
+	empty.instantiate();
+	check_rejected_second_write(rid, generation, empty, Rect2i(0, 0, 2, 2), 0, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, make_rgba8_image(Size2i(2, 2), 137, true), Rect2i(0, 0, 2, 2), 0, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, Image::create_empty(2, 2, false, Image::FORMAT_RGBAH), Rect2i(0, 0, 2, 2), 0, 0, ERR_INVALID_DATA);
+	check_rejected_second_write(rid, generation, make_rgba8_image(Size2i(1, 2), 139), Rect2i(0, 0, 2, 2), 0, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, valid, Rect2i(-1, 0, 2, 2), 0, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, valid, Rect2i(0, 0, 0, 2), 0, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, valid, Rect2i(7, 7, 2, 2), 0, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, valid, Rect2i(0, 0, 2, 2), 4, 0, ERR_INVALID_PARAMETER);
+	check_rejected_second_write(rid, generation, valid, Rect2i(0, 0, 2, 2), 0, 1, ERR_INVALID_PARAMETER);
+
+	TypedArray<Image> images;
+	images.push_back(valid);
+	images.push_back(valid);
+	TypedArray<Rect2i> regions;
+	regions.push_back(Rect2i(0, 0, 2, 2));
+	PackedInt32Array mipmaps;
+	mipmaps.push_back(0);
+	mipmaps.push_back(0);
+	PackedInt32Array layers;
+	layers.push_back(0);
+	layers.push_back(0);
+	check_rejected_batch(rid, generation, images, regions, mipmaps, layers, ERR_INVALID_PARAMETER);
+
+	regions.push_back(Rect2i(1, 1, 2, 2));
+	check_rejected_batch(rid, generation, images, regions, mipmaps, layers, ERR_INVALID_PARAMETER);
+
+	TypedArray<Image> empty_images;
+	TypedArray<Rect2i> empty_regions;
+	PackedInt32Array empty_mipmaps;
+	PackedInt32Array empty_layers;
+	check_rejected_batch(rid, generation, empty_images, empty_regions, empty_mipmaps, empty_layers, ERR_INVALID_PARAMETER);
+
+	regions.clear();
+	regions.push_back(Rect2i(0, 0, 2, 2));
+	regions.push_back(Rect2i(2, 0, 2, 2));
+	check_rejected_batch(rid, generation, images, regions, mipmaps, layers, ERR_INVALID_DATA, generation + 1);
+
+	Ref<ImageTexture> ordinary = ImageTexture::create_from_image(make_rgba8_image(Size2i(8, 8), 149));
+	ERR_PRINT_OFF;
+	CHECK(update_subresources(ordinary->get_rid(), 0, images, regions, mipmaps, layers) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[SceneTree][DrawableTexture2DArray] batched writes address exact layers and mipmaps") {
+	const int max_layers = RS::get_singleton()->texture_drawable_get_max_array_layers();
+	if (max_layers < 3) {
+		return;
+	}
+
+	Ref<DrawableTexture2DArray> texture;
+	texture.instantiate();
+	REQUIRE(texture->setup(8, 8, 3, DrawableTexture2D::DRAWABLE_FORMAT_RGBA8, Color(0, 0, 0, 0), true) == OK);
+	const RID rid = texture->get_rid();
+	const uint64_t generation = texture->get_generation();
+
+	const Ref<Image> layer_zero = make_rgba8_image(Size2i(2, 2), 157);
+	const Ref<Image> layer_two_mipmap = make_rgba8_image(Size2i(2, 1), 163);
+	const Ref<Image> layer_zero_second = make_rgba8_image(Size2i(1, 1), 167);
+	TypedArray<Image> images;
+	images.push_back(layer_zero);
+	images.push_back(layer_two_mipmap);
+	images.push_back(layer_zero_second);
+	TypedArray<Rect2i> regions;
+	regions.push_back(Rect2i(1, 1, 2, 2));
+	regions.push_back(Rect2i(1, 2, 2, 1));
+	regions.push_back(Rect2i(4, 2, 1, 1));
+	PackedInt32Array mipmaps;
+	mipmaps.push_back(0);
+	mipmaps.push_back(1);
+	mipmaps.push_back(0);
+	PackedInt32Array layers;
+	layers.push_back(0);
+	layers.push_back(2);
+	layers.push_back(0);
+	REQUIRE(update_subresources(rid, generation, images, regions, mipmaps, layers) == OK);
+
+	Ref<Image> expected_layer_zero = Image::create_empty(8, 8, false, Image::FORMAT_RGBA8);
+	expected_layer_zero->blit_rect(layer_zero, Rect2i(Vector2i(), layer_zero->get_size()), Point2i(1, 1));
+	expected_layer_zero->blit_rect(layer_zero_second, Rect2i(Vector2i(), layer_zero_second->get_size()), Point2i(4, 2));
+	const Ref<Image> actual_layer_zero = RS::get_singleton()->texture_drawable_get_subresource(rid, 0, generation, 0);
+	REQUIRE(actual_layer_zero.is_valid());
+	CHECK(actual_layer_zero->get_data() == expected_layer_zero->get_data());
+
+	Ref<Image> expected_layer_two_mipmap = Image::create_empty(4, 4, false, Image::FORMAT_RGBA8);
+	expected_layer_two_mipmap->blit_rect(layer_two_mipmap, Rect2i(Vector2i(), layer_two_mipmap->get_size()), Point2i(1, 2));
+	const Ref<Image> actual_layer_two_mipmap = RS::get_singleton()->texture_drawable_get_subresource(rid, 1, generation, 2);
+	REQUIRE(actual_layer_two_mipmap.is_valid());
+	CHECK(actual_layer_two_mipmap->get_data() == expected_layer_two_mipmap->get_data());
+
+	const Ref<Image> untouched_layer = RS::get_singleton()->texture_drawable_get_subresource(rid, 0, generation, 1);
+	REQUIRE(untouched_layer.is_valid());
+	CHECK(untouched_layer->get_data() == Image::create_empty(8, 8, false, Image::FORMAT_RGBA8)->get_data());
 }
 
 TEST_CASE("[SceneTree][DrawableTexture2D] invalid exact writes preserve bytes") {

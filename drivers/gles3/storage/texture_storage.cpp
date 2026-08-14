@@ -1713,6 +1713,93 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 	return OK;
 }
 
+Error TextureStorage::texture_drawable_update_subresources(RID p_texture, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->target != GL_TEXTURE_2D && texture->target != GL_TEXTURE_2D_ARRAY) ||
+					(texture->type != Texture::TYPE_2D && (texture->type != Texture::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+
+	const int update_count = p_images.size();
+	ERR_FAIL_COND_V(update_count == 0 || p_destination_regions.size() != update_count || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->real_format != texture->format, ERR_UNAVAILABLE);
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return ERR_UNAVAILABLE;
+	}
+
+	const int bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	Vector<Vector<uint8_t>> data;
+	data.resize(update_count);
+	for (int i = 0; i < update_count; i++) {
+		const Ref<Image> image = p_images[i];
+		const Rect2i destination_region = p_destination_regions[i];
+		const int mipmap = p_mipmaps[i];
+		const int layer = p_layers[i];
+		ERR_FAIL_COND_V(layer < 0 || layer >= texture->layers, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(mipmap < 0 || mipmap >= texture->mipmaps, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image.is_null() || image->is_empty() || image->has_mipmaps(), ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(destination_region.position.x < 0 || destination_region.position.y < 0, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(destination_region.size.x <= 0 || destination_region.size.y <= 0, ERR_INVALID_PARAMETER);
+
+		const int mip_width = MAX(1, texture->width >> mipmap);
+		const int mip_height = MAX(1, texture->height >> mipmap);
+		ERR_FAIL_COND_V(int64_t(destination_region.position.x) + destination_region.size.x > mip_width, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(int64_t(destination_region.position.y) + destination_region.size.y > mip_height, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image->get_width() != destination_region.size.x || image->get_height() != destination_region.size.y, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image->get_format() != texture->format, ERR_INVALID_DATA);
+
+		const int64_t expected_size = int64_t(destination_region.size.x) * destination_region.size.y * bytes_per_pixel;
+		data.write[i] = image->get_data();
+		ERR_FAIL_COND_V(data[i].size() != expected_size, ERR_INVALID_DATA);
+
+		for (int previous = 0; previous < i; previous++) {
+			const Rect2i previous_region = p_destination_regions[previous];
+			ERR_FAIL_COND_V(p_layers[previous] == layer && p_mipmaps[previous] == mipmap && previous_region.intersects(destination_region), ERR_INVALID_PARAMETER);
+		}
+	}
+
+	GLint previous_active_texture = GL_TEXTURE0;
+	GLint previous_binding = 0;
+	GLint previous_unpack_alignment = 4;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(texture->target == GL_TEXTURE_2D_ARRAY ? GL_TEXTURE_BINDING_2D_ARRAY : GL_TEXTURE_BINDING_2D, &previous_binding);
+	glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_unpack_alignment);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+
+	glBindTexture(texture->target, texture->tex_id);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	for (int i = 0; i < update_count; i++) {
+		const Rect2i destination_region = p_destination_regions[i];
+		if (texture->target == GL_TEXTURE_2D_ARRAY) {
+			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, p_mipmaps[i], destination_region.position.x, destination_region.position.y, p_layers[i],
+					destination_region.size.x, destination_region.size.y, 1, texture->gl_format_cache, texture->gl_type_cache, data[i].ptr());
+		} else {
+			glTexSubImage2D(GL_TEXTURE_2D, p_mipmaps[i], destination_region.position.x, destination_region.position.y,
+					destination_region.size.x, destination_region.size.y, texture->gl_format_cache, texture->gl_type_cache, data[i].ptr());
+		}
+	}
+
+	glPixelStorei(GL_UNPACK_ALIGNMENT, previous_unpack_alignment);
+	glBindTexture(texture->target, previous_binding);
+	glActiveTexture(previous_active_texture);
+	const GLenum gl_error = glGetError();
+	ERR_FAIL_COND_V(gl_error != GL_NO_ERROR, ERR_CANT_CREATE);
+
+	texture->image_cache_2d.unref();
+	return OK;
+}
+
 Error TextureStorage::texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) {
 	Texture *source = texture_owner.get_or_null(p_source);
 	ERR_FAIL_NULL_V(source, ERR_INVALID_PARAMETER);

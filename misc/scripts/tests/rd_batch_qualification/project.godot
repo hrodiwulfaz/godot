@@ -1,0 +1,15 @@
+config_version=5
+
+[application]
+
+config/name="Outpostia RD batch qualification"
+run/main_scene="res://Main.tscn"
+
+[display]
+
+window/size/viewport_width=64
+window/size/viewport_height=64
+
+[dotnet]
+
+project/assembly_name="RdBatchQualification"

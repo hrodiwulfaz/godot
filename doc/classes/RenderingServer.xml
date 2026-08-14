@@ -4043,6 +4043,19 @@
 				Writes all bytes from the one-level [param image] to one exact drawable subresource. The image size and format must exactly match [param destination_region] and the drawable. Invalid bounds, layers, mipmaps, formats, byte counts, or generations leave the texture unchanged.
 			</description>
 		</method>
+		<method name="texture_drawable_update_subresources">
+			<return type="int" enum="Error" />
+			<param index="0" name="texture" type="RID" />
+			<param index="1" name="images" type="Image[]" />
+			<param index="2" name="destination_regions" type="Rect2i[]" />
+			<param index="3" name="mipmaps" type="PackedInt32Array" />
+			<param index="4" name="layers" type="PackedInt32Array" />
+			<param index="5" name="expected_generation" type="int" />
+			<description>
+				Writes multiple exact drawable subresources under one expected carrier generation. Every indexed entry supplies one one-level [param images] value, [param destination_regions] value, [param mipmaps] value, and [param layers] value. All arrays must have the same nonzero length.
+				The complete batch is validated before the first write. Entries targeting the same layer and mipmap must have disjoint destination regions. Invalid texture metadata, a stale generation, null or empty images, embedded mipmaps, mismatched formats or dimensions, invalid bounds, invalid mipmaps, invalid layers, overlapping destination regions, or mismatched array lengths leave [param texture] unchanged and return a non-[constant @GlobalScope.OK] result. Valid disjoint writes execute in array order.
+			</description>
+		</method>
 		<method name="texture_get_format" qualifiers="const">
 			<return type="int" enum="Image.Format" />
 			<param index="0" name="texture" type="RID" />
