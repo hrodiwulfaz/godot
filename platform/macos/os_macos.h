@@ -110,6 +110,7 @@ public:
 	virtual String get_version_alias() const override;
 
 	virtual void alert(const String &p_alert, const String &p_title = "ALERT!") override;
+	virtual ConfirmationResult show_confirmation(const String &p_message, const String &p_title) override;
 
 	virtual Error open_dynamic_library(const String &p_path, void *&p_library_handle, GDExtensionData *p_data = nullptr) override;
 

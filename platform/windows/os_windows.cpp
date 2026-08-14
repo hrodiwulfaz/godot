@@ -248,6 +248,11 @@ void OS_Windows::alert(const String &p_alert, const String &p_title) {
 	MessageBoxW(nullptr, (LPCWSTR)(p_alert.utf16().get_data()), (LPCWSTR)(p_title.utf16().get_data()), MB_OK | MB_ICONEXCLAMATION | MB_TASKMODAL);
 }
 
+OS::ConfirmationResult OS_Windows::show_confirmation(const String &p_message, const String &p_title) {
+	const int result = MessageBoxW(nullptr, (LPCWSTR)(p_message.utf16().get_data()), (LPCWSTR)(p_title.utf16().get_data()), MB_OKCANCEL | MB_ICONWARNING | MB_TASKMODAL | MB_DEFBUTTON2);
+	return result == IDOK ? CONFIRMATION_RESULT_OK : CONFIRMATION_RESULT_CANCEL;
+}
+
 void OS_Windows::initialize_debugging() {
 	SetConsoleCtrlHandler(HandlerRoutine, TRUE);
 }

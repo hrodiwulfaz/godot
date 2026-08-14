@@ -168,6 +168,7 @@ protected:
 
 public:
 	virtual void alert(const String &p_alert, const String &p_title = "ALERT!") override;
+	virtual ConfirmationResult show_confirmation(const String &p_message, const String &p_title) override;
 
 	virtual Error get_entropy(uint8_t *r_buffer, int p_bytes) override;
 

@@ -32,6 +32,8 @@
 
 TEST_FORCE_LINK(test_os)
 
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/os/os.h"
 
 namespace TestOS {
@@ -102,6 +104,27 @@ TEST_CASE("[OS] Executable and data paths") {
 	CHECK_MESSAGE(
 			OS::get_singleton()->get_cache_path().is_absolute_path(),
 			"The cache path returned should be an absolute path.");
+}
+
+TEST_CASE("[OS] User data directory write probe") {
+	Error temp_error = FAILED;
+	Ref<DirAccess> temp_dir = DirAccess::create_temp("godot-user-data-probe-test", false, &temp_error);
+	REQUIRE(temp_error == OK);
+	REQUIRE(temp_dir.is_valid());
+
+	const String writable_path = temp_dir->get_current_dir();
+	String probe_path;
+	CHECK(OS::get_singleton()->probe_user_data_dir_write(writable_path, &probe_path) == OK);
+	CHECK_FALSE(probe_path.is_empty());
+	CHECK_FALSE(FileAccess::exists(probe_path));
+
+	const String blocking_file = writable_path.path_join("not-a-directory");
+	{
+		Ref<FileAccess> file = FileAccess::open(blocking_file, FileAccess::WRITE, &temp_error);
+		REQUIRE(temp_error == OK);
+		REQUIRE(file.is_valid());
+	}
+	CHECK(OS::get_singleton()->probe_user_data_dir_write(blocking_file.path_join("probe")) != OK);
 }
 
 TEST_CASE("[OS] Ticks") {
