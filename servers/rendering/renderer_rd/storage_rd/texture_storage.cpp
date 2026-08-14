@@ -2016,6 +2016,123 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 	return error;
 }
 
+Error TextureStorage::texture_drawable_update_subresources(RID p_texture, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->type != TextureStorage::TYPE_2D && (texture->type != TextureStorage::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+
+	const int update_count = p_images.size();
+	ERR_FAIL_COND_V(update_count == 0 || p_destination_regions.size() != update_count || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->validated_format != texture->format, ERR_UNAVAILABLE);
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return ERR_UNAVAILABLE;
+	}
+
+	const int bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	Vector<uint32_t> layers;
+	Vector<uint32_t> mipmaps;
+	Vector<Rect2i> destination_regions;
+	Vector<Vector<uint8_t>> data;
+	layers.resize(update_count);
+	mipmaps.resize(update_count);
+	destination_regions.resize(update_count);
+	data.resize(update_count);
+
+	for (int i = 0; i < update_count; i++) {
+		const Error piece_error = drawable_check_piece(texture->width, texture->height, texture->layers, texture->mipmaps, p_destination_regions, p_mipmaps, p_layers, i);
+		ERR_FAIL_COND_V(piece_error != OK, piece_error);
+		const Ref<Image> image = p_images[i];
+		const Rect2i destination_region = p_destination_regions[i];
+		ERR_FAIL_COND_V(image.is_null() || image->is_empty() || image->has_mipmaps(), ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image->get_width() != destination_region.size.x || image->get_height() != destination_region.size.y, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image->get_format() != texture->format, ERR_INVALID_DATA);
+
+		const int64_t expected_size = int64_t(destination_region.size.x) * destination_region.size.y * bytes_per_pixel;
+		const Vector<uint8_t> image_data = image->get_data();
+		ERR_FAIL_COND_V(image_data.size() != expected_size, ERR_INVALID_DATA);
+
+		layers.write[i] = uint32_t(p_layers[i]);
+		mipmaps.write[i] = uint32_t(p_mipmaps[i]);
+		destination_regions.write[i] = destination_region;
+		data.write[i] = image_data;
+	}
+	const Error disjoint_error = drawable_check_pieces_disjoint(p_destination_regions, p_mipmaps, p_layers);
+	ERR_FAIL_COND_V(disjoint_error != OK, disjoint_error);
+
+	const Error error = RD::get_singleton()->texture_update_regions(texture->rd_texture, layers, mipmaps, destination_regions, data);
+	if (error == OK) {
+		texture->image_cache_2d.unref();
+	}
+	return error;
+}
+
+Error TextureStorage::texture_drawable_update_subresources_data(RID p_texture, const Vector<uint8_t> &p_data, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->type != TextureStorage::TYPE_2D && (texture->type != TextureStorage::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+
+	const int update_count = p_destination_regions.size();
+	ERR_FAIL_COND_V(update_count == 0 || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(texture->validated_format != texture->format, ERR_UNAVAILABLE);
+
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return ERR_UNAVAILABLE;
+	}
+
+	// The pieces lie back to back in p_data; the device reads each one in place.
+	const uint64_t bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	Vector<uint32_t> layers;
+	Vector<uint32_t> mipmaps;
+	Vector<Rect2i> destination_regions;
+	LocalVector<const uint8_t *> pieces;
+	LocalVector<uint64_t> sizes;
+	layers.resize(update_count);
+	mipmaps.resize(update_count);
+	destination_regions.resize(update_count);
+	uint64_t offset = 0;
+	for (int i = 0; i < update_count; i++) {
+		const Error piece_error = drawable_check_piece(texture->width, texture->height, texture->layers, texture->mipmaps, p_destination_regions, p_mipmaps, p_layers, i);
+		ERR_FAIL_COND_V(piece_error != OK, piece_error);
+		const Rect2i destination_region = p_destination_regions[i];
+		const uint64_t size = uint64_t(destination_region.size.x) * uint64_t(destination_region.size.y) * bytes_per_pixel;
+		ERR_FAIL_COND_V(size > uint64_t(p_data.size()) - offset, ERR_INVALID_DATA);
+		layers.write[i] = uint32_t(p_layers[i]);
+		mipmaps.write[i] = uint32_t(p_mipmaps[i]);
+		destination_regions.write[i] = destination_region;
+		pieces.push_back(p_data.ptr() + offset);
+		sizes.push_back(size);
+		offset += size;
+	}
+	ERR_FAIL_COND_V(offset != uint64_t(p_data.size()), ERR_INVALID_DATA);
+	const Error disjoint_error = drawable_check_pieces_disjoint(p_destination_regions, p_mipmaps, p_layers);
+	ERR_FAIL_COND_V(disjoint_error != OK, disjoint_error);
+
+	const Error error = RD::get_singleton()->texture_update_regions(texture->rd_texture, layers, mipmaps, destination_regions, pieces.ptr(), sizes.ptr());
+	if (error == OK) {
+		texture->image_cache_2d.unref();
+	}
+	return error;
+}
+
 Error TextureStorage::texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) {
 	Texture *source = texture_owner.get_or_null(p_source);
 	ERR_FAIL_NULL_V(source, ERR_INVALID_PARAMETER);

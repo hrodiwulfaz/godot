@@ -30,6 +30,9 @@
 
 #pragma once
 
+#include "core/templates/local_vector.h"
+#include "core/templates/rb_set.h"
+#include "core/variant/typed_array.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -82,11 +85,88 @@ public:
 
 	virtual void texture_drawable_blit_rect(const TypedArray<RID> &p_textures, const Rect2i &p_rect, RID p_material, const Color &p_modulate, const TypedArray<RID> &p_source_textures, int p_to_mipmap) = 0;
 	virtual Error texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) = 0;
+	virtual Error texture_drawable_update_subresources(RID p_texture, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) = 0;
+	virtual Error texture_drawable_update_subresources_data(RID p_texture, const Vector<uint8_t> &p_data, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) = 0;
 	virtual Error texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) = 0;
 	virtual Ref<Image> texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) const = 0;
 	virtual uint64_t texture_drawable_get_generation(RID p_texture) const = 0;
 	virtual int texture_drawable_get_max_array_layers() const = 0;
 	virtual bool texture_drawable_is_layered(RID p_texture) const = 0;
+
+	// Checks piece p_index of a batch update of a drawable p_width x p_height with p_layer_count layers and p_mipmap_count
+	// mip levels: its layer and mip level exist and its region lies inside the mip level. drawable_check_pieces_disjoint
+	// checks the pieces against each other.
+	static Error drawable_check_piece(int p_width, int p_height, int p_layer_count, int p_mipmap_count, const TypedArray<Rect2i> &p_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, int p_index) {
+		const Rect2i region = p_regions[p_index];
+		const int mipmap = p_mipmaps[p_index];
+		const int layer = p_layers[p_index];
+		ERR_FAIL_COND_V(layer < 0 || layer >= p_layer_count, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(mipmap < 0 || mipmap >= p_mipmap_count, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(region.position.x < 0 || region.position.y < 0, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(region.size.x <= 0 || region.size.y <= 0, ERR_INVALID_PARAMETER);
+		const int mip_width = MAX(1, p_width >> mipmap);
+		const int mip_height = MAX(1, p_height >> mipmap);
+		ERR_FAIL_COND_V(int64_t(region.position.x) + region.size.x > mip_width, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(int64_t(region.position.y) + region.size.y > mip_height, ERR_INVALID_PARAMETER);
+		return OK;
+	}
+
+	// Checks that no two pieces of a batch update, each already checked by drawable_check_piece, overlap in the same
+	// layer and mip level. Sweep their vertical ends, keeping disjoint active intervals ordered by x. Only the two
+	// neighbours of a new interval can overlap it. Ends precede starts at a shared edge, so touching stays legal.
+	static Error drawable_check_pieces_disjoint(const TypedArray<Rect2i> &p_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers) {
+		struct Event {
+			int layer = 0;
+			int mipmap = 0;
+			int64_t y = 0;
+			int index = 0;
+			bool start = false;
+			bool operator<(const Event &p_other) const {
+				if (layer != p_other.layer) {
+					return layer < p_other.layer;
+				}
+				if (mipmap != p_other.mipmap) {
+					return mipmap < p_other.mipmap;
+				}
+				if (y != p_other.y) {
+					return y < p_other.y;
+				}
+				return start != p_other.start ? !start : index < p_other.index;
+			}
+		};
+		struct Interval {
+			int64_t left = 0;
+			int64_t right = 0;
+			int index = 0;
+			bool operator<(const Interval &p_other) const {
+				return left != p_other.left ? left < p_other.left : index < p_other.index;
+			}
+		};
+		const int count = p_regions.size();
+		LocalVector<Event> events;
+		LocalVector<Interval> intervals;
+		events.resize(uint64_t(count) * 2);
+		intervals.resize(count);
+		for (int i = 0; i < count; i++) {
+			const Rect2i region = p_regions[i];
+			events[uint64_t(i) * 2] = { p_layers[i], p_mipmaps[i], region.position.y, i, true };
+			events[uint64_t(i) * 2 + 1] = { p_layers[i], p_mipmaps[i], int64_t(region.position.y) + region.size.y, i, false };
+			intervals[i] = { region.position.x, int64_t(region.position.x) + region.size.x, i };
+		}
+		events.sort();
+		RBSet<Interval> active;
+		for (const Event &event : events) {
+			const Interval &interval = intervals[event.index];
+			if (!event.start) {
+				active.erase(interval);
+				continue;
+			}
+			const RBSet<Interval>::Element *placed = active.insert(interval);
+			ERR_FAIL_COND_V(placed->prev() && placed->prev()->get().right > interval.left, ERR_INVALID_PARAMETER);
+			ERR_FAIL_COND_V(placed->next() && placed->next()->get().left < interval.right, ERR_INVALID_PARAMETER);
+		}
+		return OK;
+	}
 
 	//these two APIs can be used together or in combination with the others.
 	virtual void texture_2d_placeholder_initialize(RID p_texture) = 0;

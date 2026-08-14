@@ -566,7 +566,13 @@ public:
 
 	virtual void texture_drawable_blit_rect(const TypedArray<RID> &p_textures, const Rect2i &p_rect, RID p_material, const Color &p_modulate, const TypedArray<RID> &p_source_textures, int p_to_mipmap) override;
 	virtual Error texture_drawable_update_subresource(RID p_texture, const Ref<Image> &p_image, const Rect2i &p_destination_region, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) override;
+	virtual Error texture_drawable_update_subresources(RID p_texture, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) override;
+	virtual Error texture_drawable_update_subresources_data(RID p_texture, const Vector<uint8_t> &p_data, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) override;
 	virtual Error texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) override;
+	// Checks a drawable for batch updates and returns it, or null with r_error set.
+	Texture *_get_drawable_for_batch(RID p_texture, uint64_t p_expected_generation, Error &r_error);
+	// Uploads checked pieces with one bind: piece i, the tightly packed rows of region i, is at p_pieces[i].
+	Error _upload_drawable_pieces(Texture *p_texture, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, const uint8_t *const *p_pieces);
 	virtual Ref<Image> texture_drawable_get_subresource(RID p_texture, int p_mipmap, uint64_t p_expected_generation, int p_layer = 0) const override;
 	virtual uint64_t texture_drawable_get_generation(RID p_texture) const override;
 	virtual int texture_drawable_get_max_array_layers() const override;

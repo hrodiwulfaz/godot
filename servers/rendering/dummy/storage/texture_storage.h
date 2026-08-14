@@ -158,6 +158,74 @@ public:
 		}
 		return OK;
 	}
+	virtual Error texture_drawable_update_subresources(RID p_texture, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) override {
+		DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(texture->drawable_generation == 0, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+		const int update_count = p_images.size();
+		ERR_FAIL_COND_V(update_count == 0 || p_destination_regions.size() != update_count || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+
+		for (int i = 0; i < update_count; i++) {
+			const Ref<Image> image = p_images[i];
+			const Rect2i destination_region = p_destination_regions[i];
+			const int mipmap = p_mipmaps[i];
+			const int layer = p_layers[i];
+			ERR_FAIL_COND_V(layer != 0 || mipmap < 0 || mipmap >= texture->drawable_mips.size(), ERR_INVALID_PARAMETER);
+			ERR_FAIL_COND_V(image.is_null() || image->is_empty() || image->has_mipmaps(), ERR_INVALID_PARAMETER);
+			ERR_FAIL_COND_V(destination_region.position.x < 0 || destination_region.position.y < 0 || destination_region.size.x <= 0 || destination_region.size.y <= 0, ERR_INVALID_PARAMETER);
+			ERR_FAIL_COND_V(image->get_size() != destination_region.size, ERR_INVALID_PARAMETER);
+			ERR_FAIL_COND_V(image->get_format() != texture->drawable_format, ERR_INVALID_DATA);
+
+			const Ref<Image> destination = texture->drawable_mips[mipmap];
+			ERR_FAIL_COND_V(int64_t(destination_region.position.x) + destination_region.size.x > destination->get_width() || int64_t(destination_region.position.y) + destination_region.size.y > destination->get_height(), ERR_INVALID_PARAMETER);
+			const int bytes_per_pixel = Image::get_format_pixel_size(texture->drawable_format);
+			const int64_t expected_size = int64_t(destination_region.size.x) * destination_region.size.y * bytes_per_pixel;
+			ERR_FAIL_COND_V(image->get_data().size() != expected_size, ERR_INVALID_DATA);
+		}
+		const Error disjoint_error = drawable_check_pieces_disjoint(p_destination_regions, p_mipmaps, p_layers);
+		ERR_FAIL_COND_V(disjoint_error != OK, disjoint_error);
+
+		for (int i = 0; i < update_count; i++) {
+			const Ref<Image> image = p_images[i];
+			const Rect2i destination_region = p_destination_regions[i];
+			const Error error = texture_drawable_update_subresource(p_texture, image, destination_region, p_mipmaps[i], p_expected_generation, p_layers[i]);
+			ERR_FAIL_COND_V(error != OK, error);
+		}
+		return OK;
+	}
+	virtual Error texture_drawable_update_subresources_data(RID p_texture, const Vector<uint8_t> &p_data, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) override {
+		DummyTexture *texture = texture_owner.get_or_null(p_texture);
+		ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(texture->drawable_generation == 0, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, ERR_INVALID_DATA);
+		const int update_count = p_destination_regions.size();
+		ERR_FAIL_COND_V(update_count == 0 || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+
+		const Size2i size = texture->drawable_mips[0]->get_size();
+		const uint64_t bytes_per_pixel = Image::get_format_pixel_size(texture->drawable_format);
+		uint64_t offset = 0;
+		LocalVector<uint64_t> offsets;
+		for (int i = 0; i < update_count; i++) {
+			const Error error = drawable_check_piece(size.x, size.y, 1, texture->drawable_mips.size(), p_destination_regions, p_mipmaps, p_layers, i);
+			ERR_FAIL_COND_V(error != OK, error);
+			const Rect2i destination_region = p_destination_regions[i];
+			offsets.push_back(offset);
+			offset += uint64_t(destination_region.size.x) * uint64_t(destination_region.size.y) * bytes_per_pixel;
+		}
+		ERR_FAIL_COND_V(offset != uint64_t(p_data.size()), ERR_INVALID_DATA);
+		const Error disjoint_error = drawable_check_pieces_disjoint(p_destination_regions, p_mipmaps, p_layers);
+		ERR_FAIL_COND_V(disjoint_error != OK, disjoint_error);
+
+		for (int i = 0; i < update_count; i++) {
+			const Rect2i destination_region = p_destination_regions[i];
+			const uint64_t end = i + 1 < update_count ? offsets[i + 1] : offset;
+			const Ref<Image> image = Image::create_from_data(destination_region.size.x, destination_region.size.y, false, texture->drawable_format, p_data.slice(offsets[i], end));
+			const Error error = texture_drawable_update_subresource(p_texture, image, destination_region, p_mipmaps[i], p_expected_generation, p_layers[i]);
+			ERR_FAIL_COND_V(error != OK, error);
+		}
+		return OK;
+	}
 	virtual Error texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) override {
 		return ERR_UNAVAILABLE;
 	}

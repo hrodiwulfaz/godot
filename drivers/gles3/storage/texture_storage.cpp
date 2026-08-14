@@ -1791,6 +1791,125 @@ Error TextureStorage::texture_drawable_update_subresource(RID p_texture, const R
 	return OK;
 }
 
+Texture *TextureStorage::_get_drawable_for_batch(RID p_texture, uint64_t p_expected_generation, Error &r_error) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	r_error = ERR_INVALID_PARAMETER;
+	ERR_FAIL_NULL_V(texture, nullptr);
+	ERR_FAIL_COND_V(texture->drawable_generation == 0 ||
+					(texture->target != GL_TEXTURE_2D && texture->target != GL_TEXTURE_2D_ARRAY) ||
+					(texture->type != Texture::TYPE_2D && (texture->type != Texture::TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY)) ||
+					texture->is_proxy || texture->is_render_target,
+			nullptr);
+	r_error = ERR_INVALID_DATA;
+	ERR_FAIL_COND_V(texture->drawable_generation != p_expected_generation, nullptr);
+	r_error = ERR_UNAVAILABLE;
+	ERR_FAIL_COND_V(texture->real_format != texture->format, nullptr);
+	switch (texture->format) {
+		case Image::FORMAT_RGBA8:
+		case Image::FORMAT_RGBAH:
+		case Image::FORMAT_RGBAF:
+			break;
+		default:
+			return nullptr;
+	}
+	r_error = OK;
+	return texture;
+}
+
+Error TextureStorage::_upload_drawable_pieces(Texture *p_texture, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, const uint8_t *const *p_pieces) {
+	GLint previous_active_texture = GL_TEXTURE0;
+	GLint previous_binding = 0;
+	GLint previous_unpack_alignment = 4;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(p_texture->target == GL_TEXTURE_2D_ARRAY ? GL_TEXTURE_BINDING_2D_ARRAY : GL_TEXTURE_BINDING_2D, &previous_binding);
+	glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_unpack_alignment);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+
+	glBindTexture(p_texture->target, p_texture->tex_id);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	for (int i = 0; i < p_destination_regions.size(); i++) {
+		const Rect2i destination_region = p_destination_regions[i];
+		if (p_texture->target == GL_TEXTURE_2D_ARRAY) {
+			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, p_mipmaps[i], destination_region.position.x, destination_region.position.y, p_layers[i],
+					destination_region.size.x, destination_region.size.y, 1, p_texture->gl_format_cache, p_texture->gl_type_cache, p_pieces[i]);
+		} else {
+			glTexSubImage2D(GL_TEXTURE_2D, p_mipmaps[i], destination_region.position.x, destination_region.position.y,
+					destination_region.size.x, destination_region.size.y, p_texture->gl_format_cache, p_texture->gl_type_cache, p_pieces[i]);
+		}
+	}
+
+	glPixelStorei(GL_UNPACK_ALIGNMENT, previous_unpack_alignment);
+	glBindTexture(p_texture->target, previous_binding);
+	glActiveTexture(previous_active_texture);
+	const GLenum gl_error = glGetError();
+	ERR_FAIL_COND_V(gl_error != GL_NO_ERROR, ERR_CANT_CREATE);
+
+	p_texture->image_cache_2d.unref();
+	return OK;
+}
+
+Error TextureStorage::texture_drawable_update_subresources(RID p_texture, const TypedArray<Image> &p_images, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) {
+	Error texture_error = OK;
+	Texture *texture = _get_drawable_for_batch(p_texture, p_expected_generation, texture_error);
+	if (!texture) {
+		return texture_error;
+	}
+	const int update_count = p_images.size();
+	ERR_FAIL_COND_V(update_count == 0 || p_destination_regions.size() != update_count || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+
+	const int bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	Vector<Vector<uint8_t>> data;
+	LocalVector<const uint8_t *> pieces;
+	data.resize(update_count);
+	for (int i = 0; i < update_count; i++) {
+		const Error piece_error = drawable_check_piece(texture->width, texture->height, texture->layers, texture->mipmaps, p_destination_regions, p_mipmaps, p_layers, i);
+		ERR_FAIL_COND_V(piece_error != OK, piece_error);
+		const Ref<Image> image = p_images[i];
+		const Rect2i destination_region = p_destination_regions[i];
+		ERR_FAIL_COND_V(image.is_null() || image->is_empty() || image->has_mipmaps(), ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image->get_width() != destination_region.size.x || image->get_height() != destination_region.size.y, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(image->get_format() != texture->format, ERR_INVALID_DATA);
+
+		const int64_t expected_size = int64_t(destination_region.size.x) * destination_region.size.y * bytes_per_pixel;
+		data.write[i] = image->get_data();
+		ERR_FAIL_COND_V(data[i].size() != expected_size, ERR_INVALID_DATA);
+		pieces.push_back(data[i].ptr());
+	}
+	const Error disjoint_error = drawable_check_pieces_disjoint(p_destination_regions, p_mipmaps, p_layers);
+	ERR_FAIL_COND_V(disjoint_error != OK, disjoint_error);
+	return _upload_drawable_pieces(texture, p_destination_regions, p_mipmaps, p_layers, pieces.ptr());
+}
+
+Error TextureStorage::texture_drawable_update_subresources_data(RID p_texture, const Vector<uint8_t> &p_data, const TypedArray<Rect2i> &p_destination_regions, const PackedInt32Array &p_mipmaps, const PackedInt32Array &p_layers, uint64_t p_expected_generation) {
+	Error texture_error = OK;
+	Texture *texture = _get_drawable_for_batch(p_texture, p_expected_generation, texture_error);
+	if (!texture) {
+		return texture_error;
+	}
+	const int update_count = p_destination_regions.size();
+	ERR_FAIL_COND_V(update_count == 0 || p_mipmaps.size() != update_count || p_layers.size() != update_count, ERR_INVALID_PARAMETER);
+
+	// The pieces lie back to back in p_data; each upload reads its piece in place.
+	const uint64_t bytes_per_pixel = Image::get_format_pixel_size(texture->format);
+	LocalVector<const uint8_t *> pieces;
+	uint64_t offset = 0;
+	for (int i = 0; i < update_count; i++) {
+		const Error piece_error = drawable_check_piece(texture->width, texture->height, texture->layers, texture->mipmaps, p_destination_regions, p_mipmaps, p_layers, i);
+		ERR_FAIL_COND_V(piece_error != OK, piece_error);
+		const Rect2i destination_region = p_destination_regions[i];
+		const uint64_t size = uint64_t(destination_region.size.x) * uint64_t(destination_region.size.y) * bytes_per_pixel;
+		ERR_FAIL_COND_V(size > uint64_t(p_data.size()) - offset, ERR_INVALID_DATA);
+		pieces.push_back(p_data.ptr() + offset);
+		offset += size;
+	}
+	ERR_FAIL_COND_V(offset != uint64_t(p_data.size()), ERR_INVALID_DATA);
+	const Error disjoint_error = drawable_check_pieces_disjoint(p_destination_regions, p_mipmaps, p_layers);
+	ERR_FAIL_COND_V(disjoint_error != OK, disjoint_error);
+	return _upload_drawable_pieces(texture, p_destination_regions, p_mipmaps, p_layers, pieces.ptr());
+}
+
 Error TextureStorage::texture_drawable_copy_layer(RID p_source, RID p_destination, int p_source_layer, int p_destination_layer, uint64_t p_expected_source_generation, uint64_t p_expected_destination_generation) {
 	Texture *source = texture_owner.get_or_null(p_source);
 	ERR_FAIL_NULL_V(source, ERR_INVALID_PARAMETER);
