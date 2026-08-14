@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform as host_platform
 import shlex
 import shutil
 import stat
@@ -22,10 +23,43 @@ class PipelineError(RuntimeError):
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ARTIFACT_ROOT = SOURCE_ROOT / "bin" / "outpostia-artifacts"
+DEFAULT_ARTIFACT_ROOT = SOURCE_ROOT.parent / "Artifacts"
+DEFAULT_BUILD_ROOT = SOURCE_ROOT.parent / "Builds"
+DEFAULT_CACHE_ROOT = SOURCE_ROOT.parent / "SConsCache"
 ARCHITECTURE = "x86_64"
 WINDOWS_PLATFORM = "windows"
 LINUX_PLATFORM = "linuxbsd"
+BUILD_NAMESPACE_SCHEMA = 1
+BUILD_ENVIRONMENT_NAMES = (
+    "ANGLE_LIBS",
+    "CC",
+    "CFLAGS",
+    "CL",
+    "CPPFLAGS",
+    "CXX",
+    "CXXFLAGS",
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
+    "LINK",
+    "MINGW_PREFIX",
+    "Platform",
+    "UCRTVersion",
+    "UniversalCRTSdkDir",
+    "VCINSTALLDIR",
+    "VCToolsInstallDir",
+    "VCToolsVersion",
+    "VULKAN_SDK",
+    "WindowsSdkDir",
+    "WindowsSDKVersion",
+)
+RESERVED_SCONS_FLAGS = {
+    "arch",
+    "cache_path",
+    "module_mono_enabled",
+    "platform",
+    "target",
+}
 
 
 def log(message: str) -> None:
@@ -39,11 +73,42 @@ def resolve_path(value: str | Path) -> Path:
     return path.resolve()
 
 
-def run_capture(command: list[str], context: str) -> str:
+def git_command(repository: Path, *arguments: str) -> list[str]:
+    return [
+        "git",
+        "-c",
+        f"safe.directory={repository.as_posix()}",
+        *arguments,
+    ]
+
+
+def command_environment(
+    working_directory: Path, base_environment: dict[str, str] | None = None
+) -> dict[str, str]:
+    environment = dict(base_environment or os.environ)
+    if not working_directory.joinpath(".git").is_file():
+        return environment
+
+    count_value = environment.get("GIT_CONFIG_COUNT", "0")
+    try:
+        count = int(count_value)
+    except ValueError as exception:
+        raise PipelineError(
+            f"Invalid process-local GIT_CONFIG_COUNT value: {count_value!r}"
+        ) from exception
+    environment["GIT_CONFIG_COUNT"] = str(count + 1)
+    environment[f"GIT_CONFIG_KEY_{count}"] = "safe.directory"
+    environment[f"GIT_CONFIG_VALUE_{count}"] = working_directory.as_posix()
+    return environment
+
+
+def run_capture(
+    command: list[str], context: str, working_directory: Path = SOURCE_ROOT
+) -> str:
     try:
         result = subprocess.run(
             command,
-            cwd=SOURCE_ROOT,
+            cwd=working_directory,
             check=True,
             capture_output=True,
             text=True,
@@ -63,12 +128,22 @@ def run_capture(command: list[str], context: str) -> str:
     return result.stdout.strip()
 
 
-def run_command(command: list[str], context: str, dry_run: bool) -> None:
+def run_command(
+    command: list[str],
+    context: str,
+    dry_run: bool,
+    working_directory: Path = SOURCE_ROOT,
+) -> None:
     log(f"{'[dry-run] ' if dry_run else ''}{context}: {shlex.join(command)}")
     if dry_run:
         return
     try:
-        subprocess.run(command, cwd=SOURCE_ROOT, check=True)
+        subprocess.run(
+            command,
+            cwd=working_directory,
+            check=True,
+            env=command_environment(working_directory),
+        )
     except FileNotFoundError as exception:
         raise PipelineError(f"{context}: command not found: {command[0]}") from exception
     except subprocess.CalledProcessError as exception:
@@ -94,9 +169,9 @@ def load_engine_version() -> str:
 
 
 def get_source_identity() -> tuple[str, int]:
-    sha = run_capture(["git", "rev-parse", "HEAD"], "Read engine SHA")
+    sha = run_capture(git_command(SOURCE_ROOT, "rev-parse", "HEAD"), "Read engine SHA")
     timestamp = run_capture(
-        ["git", "show", "-s", "--format=%ct", "HEAD"],
+        git_command(SOURCE_ROOT, "show", "-s", "--format=%ct", "HEAD"),
         "Read engine commit timestamp",
     )
     if len(sha) != 40:
@@ -109,7 +184,7 @@ def ensure_clean_checkout(dry_run: bool) -> None:
         log("[dry-run] Would require a clean tracked engine checkout")
         return
     status = run_capture(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
+        git_command(SOURCE_ROOT, "status", "--porcelain", "--untracked-files=no"),
         "Check engine checkout",
     )
     if status:
@@ -117,6 +192,225 @@ def ensure_clean_checkout(dry_run: bool) -> None:
             "Tracked engine changes are present. Commit or otherwise resolve them "
             "before creating distribution artifacts."
         )
+
+
+def normalized_scons_flags(values: list[str]) -> list[str]:
+    flags: dict[str, str] = {}
+    for value in values:
+        name, separator, flag_value = value.partition("=")
+        name = name.strip()
+        if not separator or not name or not flag_value.strip():
+            raise PipelineError(
+                f"Invalid --scons-flag {value!r}; expected a nonempty name=value."
+            )
+        if name in RESERVED_SCONS_FLAGS:
+            raise PipelineError(
+                f"--scons-flag cannot override the pipeline-owned {name!r} option."
+            )
+        if name in flags:
+            raise PipelineError(f"Duplicate --scons-flag option: {name}")
+        flags[name] = flag_value.strip()
+    return [f"{name}={flags[name]}" for name in sorted(flags)]
+
+
+def file_identity(path: Path) -> dict[str, str | int]:
+    return {
+        "path": str(path.resolve()),
+        "size": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
+def executable_identity(command: str, version_arguments: list[str]) -> dict | None:
+    resolved = shutil.which(command)
+    if resolved is None:
+        candidate = Path(command)
+        if not candidate.is_file():
+            return None
+        resolved = str(candidate.resolve())
+    path = Path(resolved).resolve()
+    try:
+        result = subprocess.run(
+            [str(path), *version_arguments],
+            cwd=SOURCE_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = "\n".join(
+            part.strip() for part in [result.stdout, result.stderr] if part.strip()
+        )
+        return {
+            **file_identity(path),
+            "version_arguments": version_arguments,
+            "version_exit_code": result.returncode,
+            "version_output": output,
+        }
+    except OSError as exception:
+        raise PipelineError(f"Inspect toolchain executable {path}: {exception}") from exception
+    except subprocess.TimeoutExpired as exception:
+        raise PipelineError(f"Inspect toolchain executable {path}: timed out") from exception
+
+
+def toolchain_identity(scons: str, platform: str) -> dict:
+    candidates = (
+        [
+            ("cl.exe", ["/Bv"]),
+            ("clang-cl.exe", ["--version"]),
+            (r"C:\mingw64\bin\x86_64-w64-mingw32-g++.exe", ["--version"]),
+            ("x86_64-w64-mingw32-g++.exe", ["--version"]),
+        ]
+        if platform == WINDOWS_PLATFORM
+        else [
+            ("c++", ["--version"]),
+            ("g++", ["--version"]),
+            ("clang++", ["--version"]),
+        ]
+    )
+    executables = []
+    seen_paths: set[str] = set()
+    for command, version_arguments in [(scons, ["--version"]), *candidates]:
+        identity = executable_identity(command, version_arguments)
+        if identity is None:
+            continue
+        path_key = os.path.normcase(str(identity["path"]))
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        executables.append(identity)
+
+    return {
+        "host": {
+            "system": host_platform.system(),
+            "release": host_platform.release(),
+            "version": host_platform.version(),
+            "machine": host_platform.machine(),
+        },
+        "python": {
+            **file_identity(Path(sys.executable)),
+            "version": sys.version,
+        },
+        "environment": {
+            name: os.environ[name]
+            for name in BUILD_ENVIRONMENT_NAMES
+            if name in os.environ
+        },
+        "executables": executables,
+    }
+
+
+def digest_payload(payload: dict) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_namespace_ids(
+    engine_sha: str,
+    platform: str,
+    target: str,
+    flags: list[str],
+    custom_config_sha: str,
+    toolchain: dict,
+) -> tuple[str, str, dict]:
+    compatibility = {
+        "schema": BUILD_NAMESPACE_SCHEMA,
+        "platform": platform,
+        "architecture": ARCHITECTURE,
+        "target": target,
+        "scons_flags": flags,
+        "custom_config_sha256": custom_config_sha,
+        "toolchain": toolchain,
+    }
+    output_identity = {**compatibility, "engine_sha": engine_sha}
+    return digest_payload(output_identity), digest_payload(compatibility), output_identity
+
+
+def prepare_build_namespace(
+    args: argparse.Namespace,
+    engine_sha: str,
+    platform: str,
+    target: str,
+    flags: list[str],
+    toolchain: dict,
+) -> dict:
+    custom_config = SOURCE_ROOT / "custom.py"
+    require_file(custom_config, "Resolve build configuration")
+    output_id, cache_id, identity = build_namespace_ids(
+        engine_sha,
+        platform,
+        target,
+        flags,
+        sha256_file(custom_config),
+        toolchain,
+    )
+    namespace_root = (
+        resolve_path(args.build_root)
+        / platform
+        / target
+        / f"{engine_sha[:12]}-{output_id[:20]}"
+    )
+    checkout = namespace_root / "source"
+    cache_path = resolve_path(args.cache_root) / cache_id
+    metadata_path = namespace_root / "namespace.json"
+    metadata = {
+        **identity,
+        "output_namespace_id": output_id,
+        "cache_compatibility_id": cache_id,
+        "checkout": str(checkout),
+        "cache_path": str(cache_path),
+    }
+
+    if args.dry_run:
+        log(f"[dry-run] Build namespace: {checkout}")
+        log(f"[dry-run] Compatible SCons cache: {cache_path}")
+        return {**metadata, "source_root": checkout}
+
+    namespace_root.mkdir(parents=True, exist_ok=True)
+    if checkout.exists():
+        if not checkout.joinpath(".git").is_file():
+            raise PipelineError(
+                f"Build namespace exists without a Git worktree: {checkout}"
+            )
+        actual_sha = run_capture(
+            git_command(checkout, "rev-parse", "HEAD"),
+            "Validate persistent build namespace SHA",
+            checkout,
+        )
+        if actual_sha != engine_sha:
+            raise PipelineError(
+                f"Build namespace {checkout} is {actual_sha}, expected {engine_sha}."
+            )
+        status = run_capture(
+            git_command(checkout, "status", "--porcelain", "--untracked-files=no"),
+            "Validate persistent build namespace state",
+            checkout,
+        )
+        if status:
+            raise PipelineError(
+                f"Persistent build namespace has tracked changes: {checkout}\n{status}"
+            )
+        log(f"Reusing persistent build namespace: {checkout}")
+    else:
+        run_command(
+            git_command(
+                SOURCE_ROOT,
+                "worktree",
+                "add",
+                "--detach",
+                str(checkout),
+                engine_sha,
+            ),
+            f"Create persistent {platform}/{target} build namespace",
+            False,
+        )
+        log(f"Created persistent build namespace: {checkout}")
+
+    write_json(metadata_path, metadata)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return {**metadata, "source_root": checkout}
 
 
 def sha256_file(path: Path) -> str:
@@ -302,7 +596,13 @@ def source_timestamp_iso(commit_timestamp: int) -> str:
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def scons_command(args: argparse.Namespace, platform: str, target: str) -> list[str]:
+def scons_command(
+    args: argparse.Namespace,
+    platform: str,
+    target: str,
+    cache_path: Path,
+    flags: list[str],
+) -> list[str]:
     command = [args.scons]
     if args.jobs:
         command.append(f"-j{args.jobs}")
@@ -312,17 +612,19 @@ def scons_command(args: argparse.Namespace, platform: str, target: str) -> list[
             f"target={target}",
             f"arch={ARCHITECTURE}",
             "module_mono_enabled=yes",
+            f"cache_path={cache_path}",
+            *flags,
         ]
     )
     return command
 
 
-def assembly_command(platform: str) -> list[str]:
+def assembly_command(source_root: Path, platform: str) -> list[str]:
     return [
         sys.executable,
-        str(SOURCE_ROOT / "modules" / "mono" / "build_scripts" / "build_assemblies.py"),
+        str(source_root / "modules" / "mono" / "build_scripts" / "build_assemblies.py"),
         "--godot-output-dir",
-        str(SOURCE_ROOT / "bin"),
+        str(source_root / "bin"),
         f"--godot-platform={platform}",
         "--no-deprecated",
         "--werror",
@@ -395,11 +697,22 @@ def platform_build(args: argparse.Namespace, platform_key: str) -> None:
     version = load_engine_version()
     engine_sha, commit_timestamp = get_source_identity()
     ensure_clean_checkout(args.dry_run)
+    flags = normalized_scons_flags(args.scons_flag)
+    toolchain = toolchain_identity(args.scons, scons_platform)
+    editor_namespace = prepare_build_namespace(
+        args, engine_sha, scons_platform, "editor", flags, toolchain
+    )
+    template_namespace = prepare_build_namespace(
+        args, engine_sha, scons_platform, "template_release", flags, toolchain
+    )
     _, archive_path, manifest_path, templates_dir = prepare_platform_paths(
         args, version, engine_sha, platform_key
     )
 
-    bin_dir = SOURCE_ROOT / "bin"
+    editor_source_root = editor_namespace["source_root"]
+    template_source_root = template_namespace["source_root"]
+    editor_bin_dir = editor_source_root / "bin"
+    template_bin_dir = template_source_root / "bin"
     if is_windows:
         editor_name = "godot.windows.editor.x86_64.mono.exe"
         console_editor_name = "godot.windows.editor.x86_64.mono.console.exe"
@@ -412,18 +725,36 @@ def platform_build(args: argparse.Namespace, platform_key: str) -> None:
         console_editor_name = ""
         template_names = ["godot.linuxbsd.template_release.x86_64.mono"]
 
-    editor_path = bin_dir / editor_name
-    glue_editor_path = bin_dir / (console_editor_name or editor_name)
+    editor_path = editor_bin_dir / editor_name
+    glue_editor_path = editor_bin_dir / (console_editor_name or editor_name)
     commands = [
-        scons_command(args, scons_platform, "editor"),
+        scons_command(
+            args,
+            scons_platform,
+            "editor",
+            Path(editor_namespace["cache_path"]),
+            flags,
+        ),
         [
             str(glue_editor_path),
             "--headless",
             "--generate-mono-glue",
-            str(SOURCE_ROOT / "modules" / "mono" / "glue"),
+            str(editor_source_root / "modules" / "mono" / "glue"),
         ],
-        assembly_command(scons_platform),
-        scons_command(args, scons_platform, "template_release"),
+        assembly_command(editor_source_root, scons_platform),
+        scons_command(
+            args,
+            scons_platform,
+            "template_release",
+            Path(template_namespace["cache_path"]),
+            flags,
+        ),
+    ]
+    working_directories = [
+        editor_source_root,
+        editor_source_root,
+        editor_source_root,
+        template_source_root,
     ]
     contexts = [
         f"Build {platform_key} Mono editor",
@@ -431,8 +762,10 @@ def platform_build(args: argparse.Namespace, platform_key: str) -> None:
         "Build Mono assemblies and current-version packages",
         f"Build {platform_key} Mono release template",
     ]
-    for command, context in zip(commands, contexts):
-        run_command(command, context, args.dry_run)
+    for command, context, working_directory in zip(
+        commands, contexts, working_directories
+    ):
+        run_command(command, context, args.dry_run, working_directory)
 
     if args.dry_run:
         log(
@@ -444,9 +777,9 @@ def platform_build(args: argparse.Namespace, platform_key: str) -> None:
     reported_version = validate_editor(editor_path, version, engine_sha)
     editor_files: list[tuple[str, Path]] = [(editor_name, editor_path)]
     if is_windows:
-        console_editor = bin_dir / console_editor_name
-        d3d12_runtime = bin_dir / "D3D12Core.dll"
-        d3d12_layers = bin_dir / "d3d12SDKLayers.dll"
+        console_editor = editor_bin_dir / console_editor_name
+        d3d12_runtime = editor_bin_dir / "D3D12Core.dll"
+        d3d12_layers = editor_bin_dir / "d3d12SDKLayers.dll"
         for path in [console_editor, d3d12_runtime, d3d12_layers]:
             require_file(path, "Package Windows editor")
         editor_files.extend(
@@ -458,11 +791,11 @@ def platform_build(args: argparse.Namespace, platform_key: str) -> None:
         )
 
     godotsharp_files, excluded_packages = collect_godotsharp_files(
-        bin_dir / "GodotSharp", version, engine_sha
+        editor_bin_dir / "GodotSharp", version, engine_sha
     )
     editor_files.extend(godotsharp_files)
 
-    template_sources = [bin_dir / name for name in template_names]
+    template_sources = [template_bin_dir / name for name in template_names]
     for template_path in template_sources:
         require_file(template_path, "Stage release template")
         if not template_path.name.endswith(".console.exe"):
@@ -498,9 +831,27 @@ def platform_build(args: argparse.Namespace, platform_key: str) -> None:
         "architecture": ARCHITECTURE,
         "editor_reported_version": reported_version,
         "build_targets": [
-            {"context": context, "command": command}
-            for context, command in zip(contexts, commands)
+            {
+                "context": context,
+                "command": command,
+                "working_directory": str(working_directory),
+            }
+            for context, command, working_directory in zip(
+                contexts, commands, working_directories
+            )
         ],
+        "build_namespaces": {
+            "editor": {
+                key: value
+                for key, value in editor_namespace.items()
+                if key != "source_root"
+            },
+            "template_release": {
+                key: value
+                for key, value in template_namespace.items()
+                if key != "source_root"
+            },
+        },
         "editor_archive": {
             "path": archive_path.name,
             "size": archive_path.stat().st_size,
@@ -651,9 +1002,34 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--build-root",
+        default=str(DEFAULT_BUILD_ROOT),
+        help=(
+            "Root for persistent source/output namespaces "
+            f"(default: {DEFAULT_BUILD_ROOT})"
+        ),
+    )
+    parser.add_argument(
+        "--cache-root",
+        default=str(DEFAULT_CACHE_ROOT),
+        help=(
+            "Root for configuration-compatible content-addressed SCons caches "
+            f"(default: {DEFAULT_CACHE_ROOT})"
+        ),
+    )
+    parser.add_argument(
         "--scons",
         default="scons",
         help="SCons executable or path (default: scons)",
+    )
+    parser.add_argument(
+        "--scons-flag",
+        action="append",
+        default=[],
+        help=(
+            "Additional name=value SCons option; repeat for multiple options. "
+            "Every option participates in output/cache namespace selection."
+        ),
     )
     parser.add_argument(
         "-j",
