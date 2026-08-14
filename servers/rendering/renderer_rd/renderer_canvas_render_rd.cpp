@@ -2429,7 +2429,6 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
 				const bool use_page = page_geometry_valid &&
 						page_generation_valid &&
-						r_current_batch->material.is_null() &&
 						texture_repeat == RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED &&
 						!anisotropic_filter &&
 						!bool(rect->flags & CANVAS_RECT_CLIP_UV);
