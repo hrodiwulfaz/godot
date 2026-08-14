@@ -267,6 +267,7 @@ public:
 
 	FUNC6(texture_drawable_blit_rect, const TypedArray<RID> &, const Rect2i &, RID, const Color &, const TypedArray<RID> &, int)
 	FUNC6R(Error, texture_drawable_update_subresource, RID, const Ref<Image> &, const Rect2i &, int, uint64_t, int)
+	FUNC6R(Error, texture_drawable_update_subresources, RID, const TypedArray<Image> &, const TypedArray<Rect2i> &, const PackedInt32Array &, const PackedInt32Array &, uint64_t)
 	FUNC6R(Error, texture_drawable_copy_layer, RID, RID, int, int, uint64_t, uint64_t)
 	FUNC4RC(Ref<Image>, texture_drawable_get_subresource, RID, int, uint64_t, int)
 	FUNC1RC(uint64_t, texture_drawable_get_generation, RID)
