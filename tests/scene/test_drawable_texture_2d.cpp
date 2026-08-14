@@ -643,6 +643,36 @@ TEST_CASE("[CanvasTexturePageView] page command geometry validation") {
 	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
 	command.flags &= ~RendererCanvasRender::CANVAS_RECT_TILE;
 
+	command.flags |= RendererCanvasRender::CANVAS_RECT_MSDF;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.flags &= ~RendererCanvasRender::CANVAS_RECT_MSDF;
+	command.flags |= RendererCanvasRender::CANVAS_RECT_LCD;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.flags &= ~RendererCanvasRender::CANVAS_RECT_LCD;
+	command.flags |= RendererCanvasRender::CANVAS_RECT_IS_GROUP;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.flags &= ~RendererCanvasRender::CANVAS_RECT_IS_GROUP;
+
+	command.flags |= RendererCanvasRender::CANVAS_RECT_FLIP_H |
+			RendererCanvasRender::CANVAS_RECT_FLIP_V |
+			RendererCanvasRender::CANVAS_RECT_TRANSPOSE |
+			RendererCanvasRender::CANVAS_RECT_ARRAY_LAYER;
+	command.array_layer = 2;
+	command.modulate = Color(0.25, 0.5, 0.75, 0.8);
+	CHECK(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.flags &= ~(RendererCanvasRender::CANVAS_RECT_FLIP_H |
+			RendererCanvasRender::CANVAS_RECT_FLIP_V |
+			RendererCanvasRender::CANVAS_RECT_TRANSPOSE |
+			RendererCanvasRender::CANVAS_RECT_ARRAY_LAYER);
+	command.array_layer = 0;
+
+	command.flags &= ~RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.flags |= RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING;
+	command.expected_generation = 0;
+	CHECK_FALSE(command.is_geometry_valid(Size2i(8, 8), 4));
+	command.expected_generation = 1;
+
 	command.max_region_lod = 1;
 	CHECK_FALSE(command.is_geometry_valid(Size2i(9, 8), 4));
 
