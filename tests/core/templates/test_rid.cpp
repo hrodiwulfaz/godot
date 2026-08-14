@@ -32,8 +32,10 @@
 
 TEST_FORCE_LINK(test_rid)
 
+#include "core/core_globals.h"
 #include "core/os/os.h"
 #include "core/os/thread.h"
+#include "core/string/print_string.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/templates/rid_owner.h"
@@ -43,6 +45,27 @@ TEST_FORCE_LINK(test_rid)
 #endif
 
 namespace TestRID {
+
+struct LeakPrintDetector {
+	PrintHandlerList handler;
+	bool detected = false;
+
+	LeakPrintDetector() {
+		handler.printfunc = _detect;
+		handler.userdata = this;
+		add_print_handler(&handler);
+	}
+
+	~LeakPrintDetector() {
+		remove_print_handler(&handler);
+	}
+
+	static void _detect(void *p_self, const String &p_string, bool p_error, bool p_rich) {
+		if (p_error && p_string.contains("RID allocations of type 'TeardownDiagnosticTest' were leaked at exit")) {
+			static_cast<LeakPrintDetector *>(p_self)->detected = true;
+		}
+	}
+};
 
 TEST_CASE("[RID] Default Constructor") {
 	RID rid;
@@ -97,6 +120,37 @@ TEST_CASE("[RID] 'is_valid' & 'is_null'") {
 
 	CHECK(rid_one.is_valid());
 	CHECK_FALSE(rid_one.is_null());
+}
+
+TEST_CASE("[RID_Owner] Leak diagnostics remain active outside teardown and become verbose-only during teardown") {
+	const bool original_print_ready = CoreGlobals::print_ready;
+	const bool original_stderr_enabled = OS::get_singleton()->is_stderr_enabled();
+	OS::get_singleton()->set_stderr_enabled(false);
+
+	{
+		LeakPrintDetector detector;
+		CoreGlobals::print_ready = true;
+		{
+			RID_Owner<int> owner;
+			owner.set_description("TeardownDiagnosticTest");
+			owner.make_rid(1);
+		}
+		CHECK(detector.detected);
+	}
+
+	{
+		LeakPrintDetector detector;
+		CoreGlobals::print_ready = false;
+		{
+			RID_Owner<int> owner;
+			owner.set_description("TeardownDiagnosticTest");
+			owner.make_rid(1);
+		}
+		CHECK(detector.detected == OS::get_singleton()->is_stdout_verbose());
+	}
+
+	CoreGlobals::print_ready = original_print_ready;
+	OS::get_singleton()->set_stderr_enabled(original_stderr_enabled);
 }
 
 TEST_CASE("[RID] 'get_local_index'") {
