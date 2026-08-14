@@ -30,6 +30,7 @@
 
 #include "image_texture.h"
 
+#include "core/core_globals.h"
 #include "core/io/image_loader.h"
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
@@ -242,8 +243,14 @@ void ImageTexture::_bind_methods() {
 
 ImageTexture::~ImageTexture() {
 	if (texture.is_valid()) {
-		ERR_FAIL_NULL(RenderingServer::get_singleton());
-		RenderingServer::get_singleton()->free_rid(texture);
+		RenderingServer *rendering_server = RenderingServer::get_singleton();
+		if (!rendering_server) {
+			if (CoreGlobals::print_ready || is_print_verbose_enabled()) {
+				ERR_PRINT("Parameter \"RenderingServer::get_singleton()\" is null.");
+			}
+			return;
+		}
+		rendering_server->free_rid(texture);
 	}
 }
 
