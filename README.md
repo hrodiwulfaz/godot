@@ -1,5 +1,11 @@
 # Godot Engine
 
+## Outpostia fork
+
+The `4.7-outpostia` branch is Outpostia's custom Godot build. Its upstream
+bases, fork releases, carried patches, and reasons for divergence are recorded
+in the [Outpostia fork changelog](FORK_CHANGELOG.md).
+
 <p align="center">
   <a href="https://godotengine.org">
     <img src="misc/logo/logo_outlined.svg" width="400" alt="Godot Engine logo">
