@@ -71,6 +71,18 @@ void RendererCanvasCull::_dependency_deleted(const RID &p_dependency, Dependency
 
 void RendererCanvasCull::_render_canvas_item_tree(RID p_to_render_target, Canvas::ChildItem *p_child_items, int p_child_item_count, const Transform2D &p_transform, const Rect2 &p_clip_rect, const Color &p_modulate, RendererCanvasRender::Light *p_lights, RendererCanvasRender::Light *p_directional_lights, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, uint32_t p_canvas_cull_mask, RenderingServerTypes::RenderInfo *r_render_info) {
 	RENDER_TIMESTAMP("Cull CanvasItem Tree");
+	mask_pass++;
+	if (reset_mask_sets || (mask_pass & 255) == 0) {
+		mask_epoch++;
+		mask_set_lookup.clear();
+		mask_sets.clear();
+		mask_entries.clear();
+		free_mask_entries.clear();
+		mask_sets.push_back(MaskSet());
+		mask_sets.push_back(MaskSet());
+		reset_mask_sets = false;
+		mask_sets_dirty = true;
+	}
 
 	// This is used to avoid passing the camera transform down the rendering
 	// function calls, as it won't be used in 99% of cases, because the camera
@@ -102,6 +114,7 @@ void RendererCanvasCull::_render_canvas_item_tree(RID p_to_render_target, Canvas
 
 	RENDER_TIMESTAMP("Render CanvasItems");
 
+	_write_mask_rows(list);
 	bool sdf_flag;
 	RSG::canvas_render->canvas_render_items(p_to_render_target, list, p_modulate, p_lights, p_directional_lights, p_transform, p_default_filter, p_default_repeat, p_snap_2d_vertices_to_pixel, sdf_flag, r_render_info);
 	if (sdf_flag) {
@@ -109,7 +122,7 @@ void RendererCanvasCull::_render_canvas_item_tree(RID p_to_render_target, Canvas
 	}
 }
 
-void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask) {
+void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask, uint16_t p_mask_set) {
 	int child_item_count = p_canvas_item->child_items.size();
 	RendererCanvasCull::Item **child_items = p_canvas_item->child_items.ptrw();
 	for (int i = 0; i < child_item_count; i++) {
@@ -133,6 +146,7 @@ void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_can
 				child_items[i]->ysort_xform = p_canvas_item->ysort_xform * child_xform;
 				child_items[i]->material_owner = child_items[i]->use_parent_material ? p_material_owner : nullptr;
 				child_items[i]->ysort_modulate = p_modulate;
+				child_items[i]->ysort_mask_set = p_mask_set;
 				child_items[i]->ysort_index = r_index;
 				child_items[i]->ysort_parent_abs_z_index = p_z;
 
@@ -153,7 +167,7 @@ void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_can
 				r_index++;
 
 				if (child_items[i]->sort_y) {
-					_collect_ysort_children(child_items[i], child_items[i]->use_parent_material ? p_material_owner : child_items[i], p_modulate * child_items[i]->modulate, r_items, r_index, r_ysort_children_count, abs_z, p_canvas_cull_mask);
+					_collect_ysort_children(child_items[i], child_items[i]->use_parent_material ? p_material_owner : child_items[i], p_modulate * child_items[i]->modulate, r_items, r_index, r_ysort_children_count, abs_z, p_canvas_cull_mask, _resolve_mask_set(child_items[i], p_mask_set));
 				}
 			} else {
 				r_ysort_children_count--;
@@ -302,7 +316,7 @@ void RendererCanvasCull::_attach_canvas_item_for_draw(RendererCanvasCull::Item *
 	}
 }
 
-void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item) {
+void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item, uint16_t p_mask_set) {
 	Item *ci = p_canvas_item;
 
 	if (!ci->visible) {
@@ -365,6 +379,14 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 		}
 
 		final_xform = parent_xform * self_xform;
+	}
+
+	if (unlikely(ci->mask_state)) {
+		ci->mask_set = _resolve_mask_set(ci, p_mask_set);
+		_place_owned_masks(ci, final_xform);
+	} else if (ci->mask_set != p_mask_set) {
+		// Most items keep set 0, so their records are only read here.
+		ci->mask_set = p_mask_set;
 	}
 
 	Point2 repeat_size = p_repeat_size;
@@ -446,18 +468,19 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 			child_items = (Item **)alloca(child_item_count * sizeof(Item *));
 
 			ci->ysort_xform = Transform2D();
+			ci->ysort_mask_set = p_mask_set;
 			ci->ysort_modulate = Color(ci->modulate[0] ? 1 / ci->modulate[0] : 0, ci->modulate[1] ? 1 / ci->modulate[1] : 0, ci->modulate[2] ? 1 / ci->modulate[2] : 0, ci->modulate[3] ? 1 / ci->modulate[3] : 0);
 			ci->ysort_index = 0;
 			ci->ysort_parent_abs_z_index = parent_z;
 			child_items[0] = ci;
 			int i = 1;
-			_collect_ysort_children(ci, p_material_owner, Color(1, 1, 1, 1), child_items, i, child_item_count, p_z, p_canvas_cull_mask);
+			_collect_ysort_children(ci, p_material_owner, Color(1, 1, 1, 1), child_items, i, child_item_count, p_z, p_canvas_cull_mask, ci->mask_set);
 
 			SortArray<Item *, ItemYSort> sorter;
 			sorter.sort(child_items, child_item_count);
 
 			for (i = 0; i < child_item_count; i++) {
-				_cull_canvas_item(child_items[i], final_xform * child_items[i]->ysort_xform, p_clip_rect, modulate * child_items[i]->ysort_modulate, child_items[i]->ysort_parent_abs_z_index, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, (Item *)child_items[i]->material_owner, true, p_canvas_cull_mask, child_items[i]->repeat_size, child_items[i]->repeat_times, child_items[i]->repeat_source_item);
+				_cull_canvas_item(child_items[i], final_xform * child_items[i]->ysort_xform, p_clip_rect, modulate * child_items[i]->ysort_modulate, child_items[i]->ysort_parent_abs_z_index, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, (Item *)child_items[i]->material_owner, true, p_canvas_cull_mask, child_items[i]->repeat_size, child_items[i]->repeat_times, child_items[i]->repeat_source_item, child_items[i]->ysort_mask_set);
 			}
 		} else {
 			RendererCanvasRender::Item *canvas_group_from = nullptr;
@@ -481,14 +504,14 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 			if (!child_items[i]->behind && !use_canvas_group) {
 				continue;
 			}
-			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item);
+			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item, ci->mask_set);
 		}
 		_attach_canvas_item_for_draw(ci, p_canvas_clip, r_z_list, r_z_last_list, final_xform, p_clip_rect, global_rect, modulate, p_z, p_material_owner, use_canvas_group, canvas_group_from);
 		for (int i = 0; i < child_item_count; i++) {
 			if (child_items[i]->behind || use_canvas_group) {
 				continue;
 			}
-			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item);
+			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item, ci->mask_set);
 		}
 	}
 }
@@ -496,6 +519,7 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 void RendererCanvasCull::render_canvas(RID p_render_target, Canvas *p_canvas, const Transform2D &p_transform, RendererCanvasRender::Light *p_lights, RendererCanvasRender::Light *p_directional_lights, const Rect2 &p_clip_rect, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_transforms_to_pixel, bool p_snap_2d_vertices_to_pixel, uint32_t canvas_cull_mask, RenderingServerTypes::RenderInfo *r_render_info) {
 	sdf_used = false;
 	snapping_2d_transforms_to_pixel = p_snap_2d_transforms_to_pixel;
+	snapping_2d_vertices_to_pixel = p_snap_2d_vertices_to_pixel;
 
 	if (p_canvas->children_order_dirty) {
 		p_canvas->child_items.sort();
@@ -2675,6 +2699,24 @@ void RendererCanvasCull::update() {
 }
 
 bool RendererCanvasCull::free(RID p_rid) {
+	if (canvas_mask_owner.owns(p_rid)) {
+		Mask *mask = canvas_mask_owner.get_or_null(p_rid);
+		if (Item *owner = canvas_item_owner.get_or_null(mask->owner)) {
+			owner->mask_state->owned_masks.erase(p_rid);
+		}
+		for (Item *user : mask->users) {
+			user->mask_state->masks.erase(p_rid);
+			user->mask_state->excluded_masks.erase(p_rid);
+			user->mask_state->mask_version++;
+		}
+		if (mask->entry != 0 && mask->entry_pass == mask_epoch) {
+			mask_entries[mask->entry - 1] = nullptr;
+			free_mask_entries.push_back(mask->entry);
+			reset_mask_sets |= free_mask_entries.size() >= MAX(256u, mask_entries.size() / 2);
+		}
+		canvas_mask_owner.free(p_rid);
+		return true;
+	}
 	if (canvas_owner.owns(p_rid)) {
 		Canvas *canvas = canvas_owner.get_or_null(p_rid);
 		ERR_FAIL_NULL_V(canvas, false);
@@ -2708,6 +2750,17 @@ bool RendererCanvasCull::free(RID p_rid) {
 		Item *canvas_item = canvas_item_owner.get_or_null(p_rid);
 		ERR_FAIL_NULL_V(canvas_item, true);
 		_interpolation_data.notify_free_canvas_item(p_rid, *canvas_item);
+		if (Item::MaskState *mask_state = canvas_item->mask_state) {
+			for (RID rid : mask_state->owned_masks) {
+				canvas_mask_owner.get_or_null(rid)->owner = RID();
+			}
+			for (RID rid : mask_state->masks) {
+				canvas_mask_owner.get_or_null(rid)->users.erase(canvas_item);
+			}
+			for (RID rid : mask_state->excluded_masks) {
+				canvas_mask_owner.get_or_null(rid)->users.erase(canvas_item);
+			}
+		}
 
 		if (canvas_item->parent.is_valid()) {
 			if (canvas_owner.owns(canvas_item->parent)) {
@@ -2812,6 +2865,7 @@ void RendererCanvasCull::_free_rids(T &p_owner, const char *p_type) {
 }
 
 void RendererCanvasCull::finalize() {
+	_free_rids(canvas_mask_owner, "CanvasMask");
 	_free_rids(canvas_owner, "Canvas");
 	_free_rids(canvas_item_owner, "CanvasItem");
 	_free_rids(canvas_light_owner, "CanvasLight");
@@ -2910,4 +2964,318 @@ RendererCanvasCull::~RendererCanvasCull() {
 	memfree(z_list);
 	memfree(z_last_list);
 	_canvas_cull_singleton = nullptr;
+}
+RID RendererCanvasCull::canvas_mask_allocate() {
+	return canvas_mask_owner.allocate_rid();
+}
+
+void RendererCanvasCull::canvas_mask_initialize(RID p_rid) {
+	canvas_mask_owner.initialize_rid(p_rid);
+	RSG::canvas_render->mask_created();
+}
+
+void RendererCanvasCull::canvas_mask_set_owner(RID p_mask, RID p_canvas_item) {
+	Mask *mask = canvas_mask_owner.get_or_null(p_mask);
+	ERR_FAIL_NULL(mask);
+	Item *owner = canvas_item_owner.get_or_null(p_canvas_item);
+	ERR_FAIL_COND(p_canvas_item.is_valid() && !owner);
+	if (Item *previous = canvas_item_owner.get_or_null(mask->owner)) {
+		previous->mask_state->owned_masks.erase(p_mask);
+	}
+	mask->owner = p_canvas_item;
+	if (owner) {
+		owner->get_mask_state()->owned_masks.insert(p_mask);
+	}
+}
+
+void RendererCanvasCull::canvas_mask_set_transform(RID p_mask, const Transform2D &p_unit_to_owner) {
+	Mask *mask = canvas_mask_owner.get_or_null(p_mask);
+	ERR_FAIL_NULL(mask);
+	ERR_FAIL_COND(!p_unit_to_owner.is_finite());
+	mask->unit_to_owner = p_unit_to_owner;
+}
+
+void RendererCanvasCull::canvas_mask_set_source(RID p_mask, int p_layer, const Rect2 &p_region, int p_max_lod) {
+	Mask *mask = canvas_mask_owner.get_or_null(p_mask);
+	ERR_FAIL_NULL(mask);
+	ERR_FAIL_COND(p_layer < 0 || p_layer >= 2048 || p_max_lod < 0 || p_max_lod > 30);
+	ERR_FAIL_COND(!p_region.is_finite() || p_region.position.x < 0 || p_region.position.y < 0 || p_region.size.x <= 0 || p_region.size.y <= 0);
+	mask->layer = p_layer;
+	mask->region = p_region;
+	mask->max_lod = p_max_lod;
+}
+
+void RendererCanvasCull::canvas_mask_set_outside_visible(RID p_mask, bool p_visible) {
+	Mask *mask = canvas_mask_owner.get_or_null(p_mask);
+	ERR_FAIL_NULL(mask);
+	mask->outside_visible = p_visible;
+}
+
+void RendererCanvasCull::canvas_item_add_mask(RID p_item, RID p_mask) {
+	Item *item = canvas_item_owner.get_or_null(p_item);
+	Mask *mask = canvas_mask_owner.get_or_null(p_mask);
+	ERR_FAIL_NULL(item);
+	ERR_FAIL_NULL(mask);
+	Item::MaskState *mask_state = item->get_mask_state();
+	if (!mask_state->masks.has(p_mask)) {
+		mask_state->masks.push_back(p_mask);
+		mask_state->mask_version++;
+		mask->users.insert(item);
+	}
+}
+
+void RendererCanvasCull::canvas_item_remove_mask(RID p_item, RID p_mask) {
+	Item *item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(item);
+	Item::MaskState *mask_state = item->mask_state;
+	if (!mask_state) {
+		return;
+	}
+	mask_state->masks.erase(p_mask);
+	mask_state->mask_version++;
+	if (Mask *mask = canvas_mask_owner.get_or_null(p_mask); mask && !mask_state->excluded_masks.has(p_mask)) {
+		mask->users.erase(item);
+	}
+}
+
+void RendererCanvasCull::canvas_item_set_mask_excluded(RID p_item, RID p_mask, bool p_excluded) {
+	Item *item = canvas_item_owner.get_or_null(p_item);
+	Mask *mask = canvas_mask_owner.get_or_null(p_mask);
+	ERR_FAIL_NULL(item);
+	ERR_FAIL_NULL(mask);
+	Item::MaskState *mask_state = item->get_mask_state();
+	mask_state->mask_version++;
+	if (p_excluded) {
+		mask_state->excluded_masks.insert(p_mask);
+		mask->users.insert(item);
+	} else {
+		mask_state->excluded_masks.erase(p_mask);
+		if (!mask_state->masks.has(p_mask)) {
+			mask->users.erase(item);
+		}
+	}
+}
+
+void RendererCanvasCull::canvas_set_mask_page(RID p_texture) {
+	mask_page = p_texture;
+}
+
+uint16_t RendererCanvasCull::_resolve_item_mask_set(Item *p_item, uint16_t p_inherited) {
+	Item::MaskState *mask_state = p_item->mask_state;
+	if (mask_state->masks.is_empty() && mask_state->excluded_masks.is_empty()) {
+		return p_inherited;
+	}
+	if (mask_state->cached_mask_epoch == mask_epoch && mask_state->cached_inherited_mask_set == p_inherited && mask_state->cached_mask_version == mask_state->mask_version) {
+		return mask_state->cached_mask_set;
+	}
+	mask_state->cached_mask_set = _build_mask_set(p_item, p_inherited);
+	mask_state->cached_inherited_mask_set = p_inherited;
+	mask_state->cached_mask_version = mask_state->mask_version;
+	mask_state->cached_mask_epoch = mask_epoch;
+	return mask_state->cached_mask_set;
+}
+
+void RendererCanvasCull::_place_owned_masks(Item *p_item, const Transform2D &p_transform) {
+	for (RID rid : p_item->mask_state->owned_masks) {
+		Mask *mask = canvas_mask_owner.get_or_null(rid);
+		Transform2D mask_owner_transform = p_transform;
+		if (snapping_2d_vertices_to_pixel) {
+			mask_owner_transform.columns[2] = (mask_owner_transform.columns[2] + Point2(0.5, 0.5)).floor();
+		}
+		mask->screen_transform = mask_owner_transform * mask->unit_to_owner;
+		mask->placed_pass = mask_pass;
+	}
+}
+
+uint16_t RendererCanvasCull::_build_mask_set(Item *p_item, uint16_t p_inherited) {
+	Item::MaskState *mask_state = p_item->mask_state;
+	MaskSet result = mask_sets[p_inherited];
+	for (RID rid : mask_state->excluded_masks) {
+		Mask *mask = canvas_mask_owner.get_or_null(rid);
+		if (mask->entry_pass != mask_epoch) {
+			continue;
+		}
+		for (uint16_t &entry : result.entries) {
+			if (entry == mask->entry) {
+				entry = 0;
+			}
+		}
+	}
+	for (RID rid : mask_state->masks) {
+		Mask *mask = canvas_mask_owner.get_or_null(rid);
+		if (mask->entry_pass != mask_epoch) {
+			if (!free_mask_entries.is_empty()) {
+				mask->entry = free_mask_entries[free_mask_entries.size() - 1];
+				free_mask_entries.resize(free_mask_entries.size() - 1);
+				mask_entries[mask->entry - 1] = mask;
+			} else if (mask_entries.size() >= 65535) {
+				if (!mask_state->mask_overflow_reported) {
+					ERR_PRINT("Canvas mask entry limit exceeded; affected rectangles are hidden.");
+					mask_state->mask_overflow_reported = true;
+				}
+				return 1;
+			} else {
+				mask_entries.push_back(mask);
+				mask->entry = mask_entries.size();
+			}
+			mask->entry_pass = mask_epoch;
+			// Items that exclude this mask cached their sets while it had no entry, and a reused entry can give them the same inherited set.
+			for (Item *user : mask->users) {
+				user->mask_state->mask_version++;
+			}
+		}
+		bool present = false;
+		int empty = -1;
+		for (int i = 0; i < 8; i++) {
+			present |= result.entries[i] == mask->entry;
+			if (result.entries[i] == 0) {
+				empty = i;
+			}
+		}
+		if (present) {
+			continue;
+		}
+		if (empty < 0) {
+			if (!mask_state->mask_overflow_reported) {
+				ERR_PRINT("A CanvasItem requires more than eight masks; affected rectangles are hidden.");
+				mask_state->mask_overflow_reported = true;
+			}
+			return 1;
+		}
+		result.entries[empty] = mask->entry;
+	}
+	SortArray<uint16_t> sorter;
+	sorter.sort(result.entries, 8);
+	MaskSet packed;
+	int count = 0;
+	for (uint16_t entry : result.entries) {
+		if (entry != 0) {
+			packed.entries[count++] = entry;
+		}
+	}
+	if (count == 0) {
+		return 0;
+	}
+	if (const uint16_t *found = mask_set_lookup.getptr(packed)) {
+		return *found;
+	}
+	if (mask_sets.size() >= 65536) {
+		if (!mask_state->mask_overflow_reported) {
+			ERR_PRINT("Canvas mask set limit exceeded; affected rectangles are hidden.");
+			mask_state->mask_overflow_reported = true;
+		}
+		return 1;
+	}
+	uint16_t index = mask_sets.size();
+	mask_sets.push_back(packed);
+	mask_sets_dirty = true;
+	mask_set_lookup.insert(packed, index);
+	return index;
+}
+
+void RendererCanvasCull::_write_mask_rows(RendererCanvasRender::Item *p_list) {
+	RendererCanvasRender::MaskData &data = RSG::canvas_render->mask_data;
+	data.page = mask_page;
+	data.changed_rows.clear();
+	used_mask_entries.clear();
+	if (mask_entries.is_empty()) {
+		return;
+	}
+	for (RendererCanvasRender::Item *item = p_list; item; item = item->next) {
+		if (item->mask_set < 2) {
+			continue;
+		}
+		MaskSet &set = mask_sets[item->mask_set];
+		if (set.used_pass == mask_pass) {
+			continue;
+		}
+		set.used_pass = mask_pass;
+		for (uint16_t entry : set.entries) {
+			if (entry == 0) {
+				break;
+			}
+			Mask *mask = mask_entries[entry - 1];
+			if (mask && mask->used_pass != mask_pass) {
+				mask->used_pass = mask_pass;
+				used_mask_entries.push_back(entry);
+			}
+		}
+	}
+	if (used_mask_entries.is_empty()) {
+		return;
+	}
+	const uint32_t old_size = data.rows.size();
+	const uint32_t required_size = mask_sets.size() + mask_entries.size() * 4;
+	const bool layout_changed = mask_sets_dirty || data.entries_base != mask_sets.size() || old_size != required_size;
+	mask_sets_dirty = false;
+	data.entries_base = mask_sets.size();
+	data.rows.resize(required_size);
+	RendererCanvasRender::MaskRow *rows = data.rows.ptrw();
+	if (old_size < required_size) {
+		memset(rows + old_size, 0, (required_size - old_size) * sizeof(RendererCanvasRender::MaskRow));
+	}
+	if (layout_changed) {
+		for (uint32_t i = 0; i < mask_sets.size(); i++) {
+			RendererCanvasRender::MaskRow row;
+			for (int word = 0; word < 4; word++) {
+				row.words[word] = uint32_t(mask_sets[i].entries[word * 2]) | (uint32_t(mask_sets[i].entries[word * 2 + 1]) << 16);
+			}
+			if (i >= old_size || memcmp(&rows[i], &row, sizeof(row)) != 0) {
+				rows[i] = row;
+				data.changed_rows.push_back(i);
+			}
+		}
+	}
+	Size2i page_size;
+	int page_layers = 0;
+	int page_mipmaps = 0;
+	const bool valid_page = RSG::texture_storage->texture_get_array_info(mask_page, page_size, page_layers, page_mipmaps);
+	for (uint16_t entry : used_mask_entries) {
+		RendererCanvasRender::MaskRow entry_rows[4] = {};
+		if (valid_page) {
+			_write_mask_entry(mask_entries[entry - 1], page_size, page_layers, page_mipmaps, entry_rows);
+		}
+		const uint32_t base = data.entries_base + (entry - 1) * 4;
+		for (uint32_t i = 0; i < 4; i++) {
+			if (base + i >= old_size || memcmp(&rows[base + i], &entry_rows[i], sizeof(entry_rows[i])) != 0) {
+				rows[base + i] = entry_rows[i];
+				data.changed_rows.push_back(base + i);
+			}
+		}
+	}
+	data.changed_rows.sort();
+}
+
+void RendererCanvasCull::_write_mask_entry(Mask *p_mask, const Size2 &p_page_size, int p_page_layers, int p_page_mipmaps, RendererCanvasRender::MaskRow *r_rows) {
+	if (p_mask->layer >= p_page_layers) {
+		if (!p_mask->invalid_layer_reported) {
+			ERR_PRINT("A canvas mask layer is outside the mask page; affected rectangles are hidden.");
+			p_mask->invalid_layer_reported = true;
+		}
+		return;
+	}
+	if (p_mask->placed_pass != mask_pass) {
+		if (!p_mask->missing_owner_reported) {
+			ERR_PRINT("A canvas mask owner was not visited in this canvas; affected rectangles are hidden.");
+			p_mask->missing_owner_reported = true;
+		}
+		return;
+	}
+	if (p_page_size.x <= 0 || p_page_size.y <= 0 || p_mask->region.size.x <= 0 || p_mask->region.size.y <= 0 ||
+			p_mask->region.get_end().x > p_page_size.x || p_mask->region.get_end().y > p_page_size.y ||
+			!p_mask->screen_transform.is_finite() || Math::is_zero_approx(p_mask->screen_transform.determinant())) {
+		return;
+	}
+	Transform2D inverse = p_mask->screen_transform.affine_inverse();
+	Vector2 dx(inverse[0].x * p_mask->region.size.x, inverse[0].y * p_mask->region.size.y);
+	Vector2 dy(inverse[1].x * p_mask->region.size.x, inverse[1].y * p_mask->region.size.y);
+	float lod = CLAMP(Math::log(MAX(1.0f, MAX(dx.length(), dy.length()))) / Math::log(2.0f), 0.0f, float(MIN(p_mask->max_lod, MAX(p_page_mipmaps - 1, 0))));
+	float values[16] = {
+		float(inverse[0].x), float(inverse[1].x), float(inverse[2].x), p_mask->outside_visible ? 1.0f : 0.0f,
+		float(inverse[0].y), float(inverse[1].y), float(inverse[2].y), lod,
+		float(p_mask->region.position.x / p_page_size.x), float(p_mask->region.position.y / p_page_size.y),
+		float(p_mask->region.size.x / p_page_size.x), float(p_mask->region.size.y / p_page_size.y),
+		float(p_mask->layer), float(0.5 / p_mask->region.size.x), float(0.5 / p_mask->region.size.y), 1.0f
+	};
+	memcpy(r_rows, values, sizeof(values));
 }

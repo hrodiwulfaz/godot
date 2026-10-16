@@ -3,6 +3,90 @@
 This changelog records the changes carried by the Outpostia Godot fork and why
 they exist. Official Godot release changes remain in [`CHANGELOG.md`](CHANGELOG.md).
 
+## 4.7.1-outpostia.4
+
+Date: 2026-10-15
+
+Base: Godot `4.7.1-stable` (`a13da4feb8d8aefc283c3763d33a2f170a18d541`)
+
+- Added shared canvas masks through `RenderingServer`. Rectangles inherit masks
+  through their canvas item parents, including Y-sort. Owners follow canvas
+  transforms without per-frame calls from the application.
+- Added eight-mask sets, exclusions, resource cleanup and hidden invalid or
+  overflowing sets. A ninth mask hides the affected subtree and reports one error.
+- Applied masks after custom fragment code on the main renderer and OpenGL.
+  Masked rectangles retain their material. Premultiplied alpha and
+  multiply blending preserve their coverage behavior.
+  Zero coverage preserves background alpha with OpenGL multiply blending.
+- Added one mask texture array and packed mask rows. The main renderer uses a
+  storage buffer. OpenGL uses an integer texture and reserves two texture units.
+  Every canvas shader, masked or not, may use at most the available units minus ten.
+- Packed the page layer, maximum mip level and mask set into `item_data` at
+  byte 96 of the 128-byte canvas instance record. Byte 100 stays reserved and
+  zero. Drawable arrays report at most 2048 layers.
+- Added the `sampler_domain` name for page coordinates shared with nine-patch
+  storage. Existing light data and the light texture atlas remain unchanged.
+- Set native and managed distribution identity to `4.7.1-outpostia.4`.
+- Calculate coordinates for one and two masks at sprite corners and omit mask code
+  from batches without masks. Forward+ and Mobile select plain, one-mask, two-mask or
+  general code from the highest mask count in each batch. Each rectangle skips absent
+  masks. Small plain and masked rectangles share batches; plain and masked rectangles
+  that cover at least 2000 screen pixels, measured with the item and draw-command
+  transforms, start separate batches. Three or more masks use per-pixel entry reads.
+  Rectangles hidden by an invalid mask set are not drawn.
+- Share up to two mask sampling descriptors through 128 bytes of push constants.
+  A rectangle that would add a third descriptor starts a new batch without
+  changing draw order, so per-rectangle values remain only for three or more masks. Fixed descriptor
+  slots and matching valid mask counts remove redundant fragment checks. Descriptors
+  ignore the mip level when the batch filter has no mipmaps. Per-rectangle descriptor
+  slots select between constant indexes, except on NVIDIA devices, which index push
+  constants per pixel correctly.
+- Compile new mask pipeline states in the background. Until one is ready, a general
+  mask pipeline of the same material and format draws the same picture. Masks are in
+  use once the first canvas mask is created or a mask page is set. From then on, each
+  new plain rectangle pipeline queues its general pipelines at low priority after
+  itself; plain pipelines built earlier queue theirs when masks come into use. If the
+  general pipeline a batch needs is still queued, the render thread builds that one
+  pipeline itself instead of waiting for the compiles queued before it.
+- In every RenderingDevice pipeline cache, a thread that waits for a pipeline whose
+  background compile has not started builds it itself, and a pipeline needed at once
+  is built on the calling thread. Clearing a cache drops compiles that have not
+  started and waits only for running ones. A pipeline that fails to build keeps an
+  empty entry, so it is not built again, and its compile record is released like a
+  finished one. Finished canvas compile records are released once per frame.
+- Forward+ and Mobile shader changes stop the shader's background pipeline compiles
+  before changing its data. Mobile no longer holds its shader lock while waiting for
+  a running compile that needs the same lock.
+- `RenderingServer.get_rendering_info()` reports canvas pipeline waits
+  (`RENDERING_INFO_PIPELINE_WAITS_CANVAS`) and batches drawn with a general mask
+  pipeline (`RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS`). Both counters are atomic,
+  so counting takes no lock.
+- Plain rectangles skip mask work with one check. Mask containers live in a record
+  that only items with masks allocate. Freed mask entries are reused; mask sets are
+  rebuilt when many entries are unused and every 256 canvas passes.
+- Store the first mask transform in six unused ordinary-rectangle floats. Page
+  rectangles and nine-patches keep their existing field meanings and row reads.
+  The canvas instance record remains 128 bytes.
+- Share matching two-mask linear transforms through push constants and keep their
+  translations in unused ordinary-rectangle fields. Prefer smaller clipped mask
+  bounds and discard zero coverage before the second sample and lighting.
+- Preserve pixel snapping, mask coordinates after fragment vertex writes,
+  level-zero filter margins, and blend coverage after modulation and lighting.
+- Validate page types and layers, clamp mip levels and remove expired uniform sets.
+- Cache inherited mask sets between canvas passes. Upload only changed rows and
+  skip entries that no drawn rectangle uses.
+- Reserve five extra varying locations for the two-mask path. One smooth `vec4`
+  holds both UV pairs, and four flat `vec4` values hold sampling metadata. Forward+
+  and Mobile start custom varyings at location 15 in every canvas shader, masked or
+  not, leaving one within 16 locations.
+  The largest OpenGL rectangle path uses 14 locations. Its 3.3 minimum of 60
+  varying components leaves one custom vec4 without relying on component packing.
+
+Masks affect rectangle draws only. Lines, polygons and meshes are unaffected.
+Canvas groups and `clip_children` below a masked item are unsupported.
+LCD text is unaffected, also below an overflowing mask chain. Repeated canvas items keep the mask at the first copy.
+Descendant UI rectangles receive masks unless explicitly excluded.
+
 ## 4.7.1-outpostia.3
 
 Date: 2026-08-14

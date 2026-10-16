@@ -469,6 +469,82 @@
 				Clears the [CanvasItem] and removes all commands in it.
 			</description>
 		</method>
+		<method name="canvas_mask_create">
+			<return type="RID" />
+			<description>
+				Creates a canvas sprite mask. Release it with [method free_rid]. Freeing a mask removes all item references to it. Fork-only.
+			</description>
+		</method>
+		<method name="canvas_mask_set_owner">
+			<return type="void" />
+			<param index="0" name="mask" type="RID" />
+			<param index="1" name="canvas_item" type="RID" />
+			<description>
+				Sets the CanvasItem whose complete canvas transform the mask follows. The owner must be visited in the same canvas render as its receivers. An absent owner hides affected rectangles and reports one error per mask.
+			</description>
+		</method>
+		<method name="canvas_mask_set_transform">
+			<return type="void" />
+			<param index="0" name="mask" type="RID" />
+			<param index="1" name="unit_to_owner" type="Transform2D" />
+			<description>
+				Sets the transform from the mask unit square to its owner local coordinates. Include the picture size, offset and flips here. Owner and descendant movement needs no further mask calls.
+			</description>
+		</method>
+		<method name="canvas_mask_set_source">
+			<return type="void" />
+			<param index="0" name="mask" type="RID" />
+			<param index="1" name="layer" type="int" />
+			<param index="2" name="region" type="Rect2" />
+			<param index="3" name="max_lod" type="int" />
+			<description>
+				Sets the picture layer and pixel region in the shared mask texture array. Layers range from 0 to 2047. The maximum mip level ranges from 0 to 30. The region must contain independently filtered mip levels.
+				A layer outside the current page hides affected rectangles and reports one error per mask. The mip level is clamped to the page's mip count. Filters without mipmaps use level-zero edge margins.
+			</description>
+		</method>
+		<method name="canvas_mask_set_outside_visible">
+			<return type="void" />
+			<param index="0" name="mask" type="RID" />
+			<param index="1" name="visible" type="bool" />
+			<description>
+				Sets whether pixels outside the picture remain visible. Defaults to false. Inside the picture, alpha always multiplies the sprite alpha.
+			</description>
+		</method>
+		<method name="canvas_item_add_mask">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="mask" type="RID" />
+			<description>
+				Adds a mask to this item and its descendants, including Y-sorted descendants. Duplicate masks apply once. At most eight masks may apply to one item. Overflow hides its rectangles and reports one error per item. Only rectangle draws, including sprites, texture pages and nine-patches, receive masks. Lines, polygons and meshes are unaffected. Canvas groups and clip_children beneath masked items are unsupported. Masks apply after custom fragment code and do not occupy the material slot.
+				LCD subpixel text is unaffected. With [method canvas_set_item_repeat] or [Parallax2D] repetition, the mask stays at the first copy. Descendant UI rectangles receive masks too; use [method canvas_item_set_mask_excluded] to exclude them.
+				Forward+ and Mobile use interpolated corner coordinates for one or two masks and per-pixel entry reads for larger sets. The highest mask count in each batch selects plain, one-mask, two-mask or general code. A batch holds at most two different sampling descriptors. A descriptor is the layer, region, validity and outside visibility of a mask, plus its mip level when the batch filter uses mipmaps. A rectangle that would add a third descriptor, or that has three or more masks after rectangles with one or two masks, starts a new batch; so does a rectangle with one or two masks after one with three or more. Plain and masked rectangles that cover at least 2000 screen pixels, measured with the item and draw-command transforms, also start separate batches; smaller ones share a batch. Draw order does not change. Plain and single-mask rectangles may share a two-mask batch; each rectangle skips absent masks. Rectangles hidden by an invalid mask set are not drawn. A new mask state compiles its pipeline in the background; until it is ready, a general mask pipeline of the same material draws the same picture (see [constant RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS]). Masks are in use once the first canvas mask is created or a mask page is set. From then on, each new plain rectangle pipeline queues its general mask pipelines in the background; plain pipelines built earlier queue theirs when masks come into use. If the general pipeline a batch needs is still queued, the render thread builds that one pipeline itself instead of waiting for the compiles queued before it (see [constant RENDERING_INFO_PIPELINE_WAITS_CANVAS]). Custom fragment writes to VERTEX do not move masks. Every canvas shader, masked or not, supports at least one custom vec4 varying on minimum OpenGL 3.3 hardware. Forward+ and Mobile reserve 15 varying locations in every canvas shader, which leaves one location within the minimum 16-location budget.
+			</description>
+		</method>
+		<method name="canvas_item_remove_mask">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="mask" type="RID" />
+			<description>
+				Removes an explicitly added mask from this item. An inherited copy still applies unless excluded.
+			</description>
+		</method>
+		<method name="canvas_item_set_mask_excluded">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="mask" type="RID" />
+			<param index="2" name="excluded" type="bool" />
+			<description>
+				Excludes an inherited mask from this item and its descendants. Explicitly added masks still apply. Set excluded to false to restore inheritance.
+			</description>
+		</method>
+		<method name="canvas_set_mask_page">
+			<return type="void" />
+			<param index="0" name="texture" type="RID" />
+			<description>
+				Sets the shared 2D texture array containing all canvas mask pictures. Clear this RID before freeing the texture. Without a page, masked rectangles are hidden.
+				Wrong texture types and freed textures also hide masked rectangles. OpenGL reserves ten canvas texture units in total in every canvas shader, masked or not, and custom textures start at unit 1. Every custom canvas shader may use at most the device texture-unit count minus ten. Each sampler2D and each sampler-array element uses one unit. A sampler2DArray uses one unit regardless of its layer count.
+			</description>
+		</method>
 		<method name="canvas_item_create">
 			<return type="RID" />
 			<description>
@@ -6331,6 +6407,12 @@
 		</constant>
 		<constant name="RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION" value="10" enum="RenderingInfo">
 			Number of pipeline compilations that were triggered to optimize the current scene. These compilations are done in the background and should not cause any stutters whatsoever.
+		</constant>
+		<constant name="RENDERING_INFO_PIPELINE_WAITS_CANVAS" value="11" enum="RenderingInfo">
+			Number of times the 2D canvas renderer waited for a pipeline to be built, since the start. Each wait is for one pipeline: one that was never compiled, or one whose background compile had not finished. A waiting thread builds a pipeline whose compile has not started itself. Always [code]0[/code] with the Compatibility renderer.
+		</constant>
+		<constant name="RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS" value="12" enum="RenderingInfo">
+			Number of canvas batches drawn with a general mask pipeline because the pipeline specialized for their mask state was still compiling or could not be built, since the start. Always [code]0[/code] with the Compatibility renderer.
 		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.

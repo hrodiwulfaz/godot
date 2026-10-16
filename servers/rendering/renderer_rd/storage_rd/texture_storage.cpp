@@ -944,6 +944,7 @@ TextureStorage::CanvasTextureInfo TextureStorage::canvas_texture_get_info(RID p_
 	res.normal = ctc.normal;
 	res.specular = ctc.specular;
 	res.sampler = material_storage->sampler_rd_get_default(filter, repeat);
+	res.mipmapped = filter >= RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS;
 	res.size = ct->size_cache;
 	res.specular_color = ct->specular_color;
 	res.use_normal = ct->use_normal_cache;
@@ -2165,7 +2166,7 @@ uint64_t TextureStorage::texture_drawable_get_generation(RID p_texture) const {
 }
 
 int TextureStorage::texture_drawable_get_max_array_layers() const {
-	return int(MIN(uint64_t(INT32_MAX), RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_ARRAY_LAYERS)));
+	return int(MIN(uint64_t(2048), RD::get_singleton()->limit_get(RD::LIMIT_MAX_TEXTURE_ARRAY_LAYERS)));
 }
 
 bool TextureStorage::texture_drawable_is_layered(RID p_texture) const {
@@ -2464,6 +2465,17 @@ void TextureStorage::texture_debug_usage(List<RenderingServerTypes::TextureInfo>
 }
 
 void TextureStorage::texture_set_force_redraw_if_visible(RID p_texture, bool p_enable) {
+}
+
+bool TextureStorage::texture_get_array_info(RID p_texture, Size2i &r_size, int &r_layers, int &r_mipmaps) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	if (!texture || texture->type != TYPE_LAYERED || texture->layered_type != RSE::TEXTURE_LAYERED_2D_ARRAY || texture->rd_texture.is_null()) {
+		return false;
+	}
+	r_size = Size2i(texture->width, texture->height);
+	r_layers = texture->layers;
+	r_mipmaps = texture->mipmaps;
+	return true;
 }
 
 Size2 TextureStorage::texture_size_with_proxy(RID p_proxy) {

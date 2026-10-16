@@ -1,5 +1,15 @@
 #define MAX_LIGHTS_PER_ITEM uint(16)
 
+#ifdef USE_MASKS
+uniform highp usampler2D mask_rows; //texunit:-8
+uniform sampler2DArray mask_page; //texunit:-9
+uniform bool mask_mipmaps;
+
+uvec4 read_mask_row(uint row) {
+	return texelFetch(mask_rows, ivec2(row % 1024u, row / 1024u), 0);
+}
+#endif
+
 #define M_PI 3.14159265359
 
 #define SDF_MAX_LENGTH 16384.0
@@ -49,7 +59,7 @@ layout(std140) uniform CanvasData { //ubo:0
 
 	uint directional_light_count;
 	float tex_to_sdf;
-	uint pad1;
+	uint mask_entries_base;
 	uint pad2;
 };
 

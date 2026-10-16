@@ -43,6 +43,9 @@ using namespace RendererSceneRenderImplementation;
 void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	//compile
 
+	// Background pipeline compilations read this shader's data and lock the shader mutex, so running ones finish and queued ones are dropped before this function locks it or changes the data.
+	pipeline_hash_map.clear_pipelines();
+
 	code = p_code;
 	ubo_size = 0;
 	uniforms.clear();
@@ -241,8 +244,6 @@ void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	ubo_size = gen_code.uniform_total_size;
 	ubo_offsets = gen_code.uniform_offsets;
 	texture_uniforms = gen_code.texture_uniforms;
-
-	pipeline_hash_map.clear_pipelines();
 
 	// If any form of Alpha Antialiasing is enabled, set the blend mode to alpha to coverage.
 	if (alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF) {

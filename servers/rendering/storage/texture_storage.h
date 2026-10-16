@@ -118,6 +118,7 @@ public:
 	virtual void texture_set_force_redraw_if_visible(RID p_texture, bool p_enable) = 0;
 
 	virtual Size2 texture_size_with_proxy(RID p_proxy) = 0;
+	virtual bool texture_get_array_info(RID p_texture, Size2i &r_size, int &r_layers, int &r_mipmaps) const { return false; }
 
 	virtual void texture_rd_initialize(RID p_texture, const RID &p_rd_texture, const RSE::TextureLayeredType p_layer_type = RSE::TEXTURE_LAYERED_2D_ARRAY) = 0;
 	virtual RID texture_get_rd_texture(RID p_texture, bool p_srgb = false) const = 0;

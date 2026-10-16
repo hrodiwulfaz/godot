@@ -40,6 +40,7 @@ Error CanvasTexturePageView::configure(const Ref<Texture> &p_page_texture, const
 	ERR_FAIL_COND_V(p_page_texture.is_null(), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_physical_region.position.x < 0 || p_physical_region.position.y < 0 || p_physical_region.size.x <= 0 || p_physical_region.size.y <= 0, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_max_region_lod > 30 || p_expected_generation == 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_array_layer >= 2048, ERR_INVALID_PARAMETER);
 
 	Ref<DrawableTexture2D> drawable = p_page_texture;
 	Ref<DrawableTexture2DArray> drawable_array = p_page_texture;

@@ -1963,7 +1963,7 @@ uint64_t TextureStorage::texture_drawable_get_generation(RID p_texture) const {
 }
 
 int TextureStorage::texture_drawable_get_max_array_layers() const {
-	return MAX(0, GLES3::Config::get_singleton()->max_texture_array_layers);
+	return CLAMP(GLES3::Config::get_singleton()->max_texture_array_layers, 0, 2048);
 }
 
 bool TextureStorage::texture_drawable_is_layered(RID p_texture) const {
@@ -2435,6 +2435,17 @@ void TextureStorage::texture_set_force_redraw_if_visible(RID p_texture, bool p_e
 	ERR_FAIL_NULL(texture);
 
 	texture->redraw_if_visible = p_enable;
+}
+
+bool TextureStorage::texture_get_array_info(RID p_texture, Size2i &r_size, int &r_layers, int &r_mipmaps) const {
+	const Texture *texture = texture_owner.get_or_null(p_texture);
+	if (!texture || texture->type != Texture::TYPE_LAYERED || texture->target != GL_TEXTURE_2D_ARRAY) {
+		return false;
+	}
+	r_size = Size2i(texture->width, texture->height);
+	r_layers = texture->layers;
+	r_mipmaps = texture->mipmaps;
+	return true;
 }
 
 Size2 TextureStorage::texture_size_with_proxy(RID p_texture) {

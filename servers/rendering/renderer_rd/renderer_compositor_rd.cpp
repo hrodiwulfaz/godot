@@ -181,6 +181,7 @@ void RendererCompositorRD::finalize() {
 	memdelete(material_storage);
 	memdelete(texture_storage);
 	memdelete(utilities);
+	PipelineCompilationRD::release_all_retired();
 
 	//only need to erase these, the rest are erased by cascade
 	blit.shader.version_free(blit.shader_version);

@@ -178,7 +178,7 @@ public:
 
 		uint32_t directional_light_count;
 		float tex_to_sdf;
-		uint32_t pad1;
+		uint32_t mask_entries_base;
 		uint32_t pad2;
 	};
 
@@ -215,8 +215,8 @@ public:
 				};
 				float dst_rect[4];
 				float src_rect[4];
-				uint32_t array_layer;
-				uint32_t max_region_lod;
+				uint32_t item_data;
+				uint32_t reserved;
 			};
 			//primitive
 			struct {
@@ -231,8 +231,8 @@ public:
 	};
 
 	static_assert(sizeof(InstanceData) == 128, "2D instance data struct size must be 128 bytes");
-	static_assert(offsetof(InstanceData, array_layer) == 96, "2D instance array layer must remain at byte 96");
-	static_assert(offsetof(InstanceData, max_region_lod) == 100, "2D instance maximum region LOD must remain at byte 100");
+	static_assert(offsetof(InstanceData, item_data) == 96, "2D instance item data must remain at byte 96");
+	static_assert(offsetof(InstanceData, reserved) == 100, "2D instance reserved word must remain at byte 100");
 	static_assert(offsetof(InstanceData, flags) == 104, "2D instance flags must remain at byte 104");
 	static_assert(offsetof(InstanceData, instance_uniforms_ofs) == 108, "2D instance uniform offset must remain at byte 108");
 
@@ -310,6 +310,9 @@ public:
 
 		LightUniform *light_uniforms = nullptr;
 
+		GLuint mask_rows_texture = 0;
+		uint32_t mask_rows_capacity = 0;
+
 		GLuint shadow_texture = 0;
 		GLuint shadow_depth_buffer = 0;
 		GLuint shadow_fb = 0;
@@ -318,6 +321,8 @@ public:
 		bool using_directional_lights = false;
 
 		RID current_tex;
+		bool current_masks = false;
+		bool mask_mipmaps = false;
 		RSE::CanvasItemTextureFilter current_filter_mode = RSE::CANVAS_ITEM_TEXTURE_FILTER_MAX;
 		RSE::CanvasItemTextureRepeat current_repeat_mode = RSE::CANVAS_ITEM_TEXTURE_REPEAT_MAX;
 
@@ -363,7 +368,7 @@ public:
 	bool free(RID p_rid) override;
 	void update() override;
 
-	void _bind_canvas_texture(RID p_texture, RSE::CanvasItemTextureFilter p_base_filter, RSE::CanvasItemTextureRepeat p_base_repeat);
+	void _bind_canvas_texture(RID p_texture, RSE::CanvasItemTextureFilter p_base_filter, RSE::CanvasItemTextureRepeat p_base_repeat, bool p_use_masks);
 	void _prepare_canvas_texture(RID p_texture, RSE::CanvasItemTextureFilter p_base_filter, RSE::CanvasItemTextureRepeat p_base_repeat, uint32_t &r_index, Size2 &r_texpixel_size);
 
 	void canvas_render_items(RID p_to_render_target, Item *p_item_list, const Color &p_modulate, Light *p_light_list, Light *p_directional_list, const Transform2D &p_canvas_transform, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, bool &r_sdf_used, RenderingServerTypes::RenderInfo *r_render_info = nullptr) override;

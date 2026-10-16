@@ -8,6 +8,7 @@
 
 #define INSTANCE_FLAGS_CLIP_RECT_UV (1 << 4)
 #define INSTANCE_FLAGS_TRANSPOSE_RECT (1 << 5)
+#define INSTANCE_FLAGS_MASK_INDEX_SHIFT 6
 
 #define INSTANCE_FLAGS_NINEPATCH_DRAW_CENTER_SHIFT 8
 #define INSTANCE_FLAGS_NINEPATCH_H_MODE_SHIFT 9
@@ -17,6 +18,7 @@
 #define INSTANCE_FLAGS_SHADOW_MASKED (1 << INSTANCE_FLAGS_SHADOW_MASKED_SHIFT)
 #define INSTANCE_FLAGS_USE_ARRAY_LAYER (1U << 29)
 #define INSTANCE_FLAGS_USE_REGION_SAMPLING (1U << 30)
+#define INSTANCE_FLAGS_MASK_REVERSE (1U << 31)
 
 struct InstanceData {
 	vec2 world_x;
@@ -32,8 +34,8 @@ struct InstanceData {
 	vec4 ninepatch_margins;
 	vec4 dst_rect; //for built-in rect and UV
 	vec4 src_rect;
-	uint array_layer;
-	uint max_region_lod;
+	uint item_data;
+	uint reserved;
 
 #endif
 	uint flags;
@@ -59,6 +61,11 @@ layout(push_constant, std430) uniform Params {
 
 	vec2 msdf;
 	vec2 color_texture_pixel_size;
+#ifdef USE_UNIFORM_MASK
+	vec4 mask_regions[2];
+	vec4 mask_extras[2];
+	vec4 mask_basis[2];
+#endif
 #ifdef USE_ATTRIBUTES
 	// Particles and meshes
 	vec2 world_x;
@@ -93,6 +100,38 @@ uint sc_packed_0() {
 }
 
 #endif
+
+bool sc_mask_mipmaps() {
+	return ((sc_packed_0() >> 17) & 1U) != 0;
+}
+
+bool sc_mask_all_valid() {
+	return ((sc_packed_0() >> 7) & 1U) != 0;
+}
+
+bool sc_mask_uniform_slots() {
+	return ((sc_packed_0() >> 8) & 1U) != 0;
+}
+
+uint sc_mask_uniform_index(uint slot) {
+	return (sc_packed_0() >> (9U + slot)) & 1U;
+}
+
+bool sc_mask_shared_basis() {
+	return ((sc_packed_0() >> 16) & 1U) != 0;
+}
+
+bool sc_mask_same_uv() {
+	return ((sc_packed_0() >> 11) & 1U) != 0;
+}
+
+bool sc_mask_valid(uint index) {
+	return ((sc_packed_0() >> (12U + index)) & 1U) != 0;
+}
+
+float sc_mask_outside(uint index) {
+	return float((sc_packed_0() >> (14U + index)) & 1U);
+}
 
 bool sc_use_lighting() {
 	return ((sc_packed_0() >> 0) & 1U) != 0;
@@ -134,6 +173,11 @@ bool sc_region_mip_trilinear() {
 
 // The values passed per draw primitives are cached within it
 
+layout(set = 0, binding = 0) uniform texture2DArray mask_page;
+layout(set = 0, binding = 8, std430) restrict readonly buffer MaskData {
+	uvec4 rows[];
+} mask_data;
+
 layout(set = 0, binding = 1, std140) uniform CanvasData {
 	mat4 canvas_transform;
 	mat4 screen_transform;
@@ -151,6 +195,10 @@ layout(set = 0, binding = 1, std140) uniform CanvasData {
 	float tex_to_sdf;
 	float shadow_pixel_size;
 	uint flags;
+	uint mask_entries_base;
+	uint mask_padding_0;
+	uint mask_padding_1;
+	uint mask_padding_2;
 }
 canvas_data;
 

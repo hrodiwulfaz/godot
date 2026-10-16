@@ -383,6 +383,20 @@ RID RendererCanvasRenderRD::_create_base_uniform_set(RID p_to_render_target, boo
 	//re create canvas state
 	thread_local LocalVector<RD::Uniform> uniforms;
 	uniforms.clear();
+	{
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.binding = 0;
+		u.append_id(state.mask_page);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.binding = 8;
+		u.append_id(state.mask_buffer);
+		uniforms.push_back(u);
+	}
 
 	{
 		RD::Uniform u;
@@ -461,6 +475,14 @@ RID RendererCanvasRenderRD::_create_base_uniform_set(RID p_to_render_target, boo
 	material_storage->samplers_rd_get_default().append_uniforms(uniforms, SAMPLERS_BINDING_FIRST_INDEX);
 
 	RID uniform_set = RD::get_singleton()->uniform_set_create(uniforms, shader.default_version_rd_shader, BASE_UNIFORM_SET);
+	for (uint32_t i = 0; i < state.mask_uniform_sets.size();) {
+		if (!RD::get_singleton()->uniform_set_is_valid(state.mask_uniform_sets[i])) {
+			state.mask_uniform_sets.remove_at_unordered(i);
+		} else {
+			i++;
+		}
+	}
+	state.mask_uniform_sets.push_back(uniform_set);
 	if (p_backbuffer) {
 		texture_storage->render_target_set_backbuffer_uniform_set(p_to_render_target, uniform_set);
 	} else {
@@ -506,7 +528,130 @@ RID RendererCanvasRenderRD::_get_pipeline_specialization_or_ubershader(CanvasSha
 	return RID();
 }
 
+// One general mask pipeline per rectangle kind reads every mask value per rectangle and handles every mask state.
+const RendererCanvasRenderRD::ShaderVariant RendererCanvasRenderRD::general_mask_variants[3][2] = {
+	{ SHADER_VARIANT_QUAD_DOUBLE_MASK, SHADER_VARIANT_QUAD_MASK },
+	{ SHADER_VARIANT_QUAD_PAGE_DOUBLE_MASK, SHADER_VARIANT_QUAD_PAGE_MASK },
+	{ SHADER_VARIANT_NINEPATCH_DOUBLE_MASK, SHADER_VARIANT_NINEPATCH_MASK },
+};
+
+void RendererCanvasRenderRD::_track_compilations(CanvasShaderData *p_shader_data) {
+	if (!p_shader_data->compilations_tracked) {
+		p_shader_data->compilations_tracked = true;
+		state.shaders_with_compilations.push_back(p_shader_data);
+	}
+}
+
+void RendererCanvasRenderRD::_queue_general_mask_pipelines(CanvasShaderData *p_shader_data, const PipelineKey &p_plain_key) {
+	bool queued = false;
+	for (ShaderVariant variant : general_mask_variants[p_plain_key.variant]) {
+		for (uint32_t mipmaps = 0; mipmaps < 2; mipmaps++) {
+			PipelineKey general = p_plain_key;
+			general.variant = variant;
+			general.shader_specialization.mask_mipmaps = mipmaps;
+			queued |= p_shader_data->pipeline_hash_map.compile_pipeline(general, general.hash(), RSE::PIPELINE_SOURCE_CANVAS, false);
+		}
+	}
+	if (queued) {
+		_track_compilations(p_shader_data);
+	}
+}
+
+RID RendererCanvasRenderRD::_get_rect_pipeline(CanvasShaderData *p_shader_data, PipelineKey &r_pipeline_key, PushConstant &r_push_constant, bool &r_general_masks) {
+	r_pipeline_key.ubershader = 0;
+	r_push_constant.shader_specialization = {};
+	r_general_masks = false;
+	const uint32_t hash = r_pipeline_key.hash();
+	RID pipeline = p_shader_data->pipeline_hash_map.get_compiled_pipeline(hash);
+	if (likely(pipeline.is_valid())) {
+		return pipeline;
+	}
+	if (r_pipeline_key.variant <= SHADER_VARIANT_NINEPATCH) {
+		pipeline = p_shader_data->pipeline_hash_map.get_pipeline(r_pipeline_key, hash, true, RSE::PIPELINE_SOURCE_CANVAS);
+		if (pipeline.is_valid() && !r_pipeline_key.shader_specialization.use_lcd) {
+			if (state.masks_in_use) {
+				// The general mask pipelines of this material and format compile in the background after the plain one, so masks can appear without a wait.
+				_queue_general_mask_pipelines(p_shader_data, r_pipeline_key);
+			} else {
+				if (p_shader_data->plain_rect_keys.is_empty()) {
+					state.shaders_with_plain_keys.push_back(p_shader_data);
+				}
+				p_shader_data->plain_rect_keys.push_back(r_pipeline_key);
+			}
+		}
+		return pipeline;
+	}
+	// A specialized mask pipeline compiles in the background. Until it is ready, the general mask pipeline of the same material and format draws the same pictures.
+	PipelineKey general = r_pipeline_key;
+	const uint32_t kind = (r_pipeline_key.variant - SHADER_VARIANT_QUAD_MASK) % 3;
+	general.variant = general_mask_variants[kind][r_pipeline_key.variant >= SHADER_VARIANT_QUAD_MASK && r_pipeline_key.variant <= SHADER_VARIANT_NINEPATCH_MASK ? 1 : 0];
+	general.shader_specialization.mask_all_valid = false;
+	general.shader_specialization.mask_uniform_slots = false;
+	general.shader_specialization.mask_uniform_indices = 0;
+	general.shader_specialization.mask_same_uv = false;
+	general.shader_specialization.mask_valid_bits = 0;
+	general.shader_specialization.mask_outside_bits = 0;
+	general.shader_specialization.mask_shared_basis = false;
+	const uint32_t general_hash = general.hash();
+	if (general_hash == hash) {
+		return p_shader_data->pipeline_hash_map.get_pipeline(r_pipeline_key, hash, true, RSE::PIPELINE_SOURCE_CANVAS);
+	}
+	if (p_shader_data->pipeline_hash_map.compile_pipeline(r_pipeline_key, hash, RSE::PIPELINE_SOURCE_CANVAS, false)) {
+		_track_compilations(p_shader_data);
+	}
+	r_general_masks = true;
+	return p_shader_data->pipeline_hash_map.get_pipeline(general, general_hash, true, RSE::PIPELINE_SOURCE_CANVAS);
+}
+
 void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p_item_list, const Color &p_modulate, Light *p_light_list, Light *p_directional_light_list, const Transform2D &p_canvas_transform, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, bool &r_sdf_used, RenderingServerTypes::RenderInfo *r_render_info) {
+	RendererRD::TextureStorage *mask_storage = RendererRD::TextureStorage::get_singleton();
+	RID page;
+	Size2i page_size;
+	int page_layers = 0;
+	int page_mipmaps = 0;
+	if (mask_storage->texture_get_array_info(mask_data.page, page_size, page_layers, page_mipmaps)) {
+		page = mask_storage->texture_get_rd_texture(mask_data.page);
+	}
+	if (page.is_null()) {
+		page = mask_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_TRANSPARENT);
+	} else {
+		_set_masks_in_use();
+	}
+	if (page != state.mask_page || uint32_t(mask_data.rows.size()) > state.mask_capacity) {
+		for (RID uniform_set : state.mask_uniform_sets) {
+			if (RD::get_singleton()->uniform_set_is_valid(uniform_set)) {
+				RD::get_singleton()->free_rid(uniform_set);
+			}
+		}
+		state.mask_uniform_sets.clear();
+		state.mask_page = page;
+	}
+	if (uint32_t(mask_data.rows.size()) > state.mask_capacity) {
+		while (state.mask_capacity < uint32_t(mask_data.rows.size())) {
+			state.mask_capacity *= 2;
+		}
+		if (state.mask_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(state.mask_buffer);
+			state.mask_buffer = RID();
+		}
+	}
+	const bool new_mask_buffer = state.mask_buffer.is_null();
+	if (new_mask_buffer) {
+		state.mask_buffer = RD::get_singleton()->storage_buffer_create(state.mask_capacity * sizeof(MaskRow));
+	}
+	if (new_mask_buffer && !mask_data.rows.is_empty()) {
+		RD::get_singleton()->buffer_update(state.mask_buffer, 0, mask_data.rows.size() * sizeof(MaskRow), mask_data.rows.ptr());
+	} else {
+		for (uint32_t i = 0; i < mask_data.changed_rows.size();) {
+			const uint32_t first = mask_data.changed_rows[i++];
+			uint32_t end = first + 1;
+			while (i < mask_data.changed_rows.size() && mask_data.changed_rows[i] == end) {
+				i++;
+				end++;
+			}
+			RD::get_singleton()->buffer_update(state.mask_buffer, first * sizeof(MaskRow), (end - first) * sizeof(MaskRow), mask_data.rows.ptr() + first);
+		}
+	}
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
@@ -729,6 +874,7 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 		state_buffer.flags = use_linear_colors ? CANVAS_FLAGS_CONVERT_ATTRIBUTES_TO_LINEAR : 0;
 
+		state_buffer.mask_entries_base = mask_data.entries_base;
 		RD::get_singleton()->buffer_update(state.canvas_state_buffer, 0, sizeof(State::Buffer), &state_buffer);
 	}
 
@@ -1542,6 +1688,13 @@ void RendererCanvasRenderRD::CanvasShaderData::_create_pipeline(PipelineKey p_pi
 void RendererCanvasRenderRD::CanvasShaderData::set_code(const String &p_code) {
 	//compile
 
+	// Background pipeline compilations read this shader's data and lock the shader mutex, so running ones finish and queued ones are dropped before either changes.
+	pipeline_hash_map.clear_pipelines();
+	if (!plain_rect_keys.is_empty()) {
+		plain_rect_keys.clear();
+		static_cast<RendererCanvasRenderRD *>(RendererCanvasRender::singleton)->state.shaders_with_plain_keys.erase(this);
+	}
+
 	code = p_code;
 	ubo_size = 0;
 	uniforms.clear();
@@ -1591,8 +1744,6 @@ void RendererCanvasRenderRD::CanvasShaderData::set_code(const String &p_code) {
 
 	uses_screen_texture_mipmaps = gen_code.uses_screen_texture_mipmaps;
 	uses_screen_texture = gen_code.uses_screen_texture;
-
-	pipeline_hash_map.clear_pipelines();
 
 	if (version.is_null()) {
 		version = canvas_singleton->shader.canvas_shader.version_create(false);
@@ -1681,10 +1832,18 @@ RendererCanvasRenderRD::CanvasShaderData::CanvasShaderData() {
 	RendererCanvasRenderRD *canvas_singleton = static_cast<RendererCanvasRenderRD *>(RendererCanvasRender::singleton);
 	pipeline_hash_map.set_creation_object_and_function(this, &CanvasShaderData::_create_pipeline);
 	pipeline_hash_map.set_compilations(&canvas_singleton->shader.pipeline_compilations[0], &canvas_singleton->shader.mutex);
+	pipeline_hash_map.set_waits(&canvas_singleton->shader.pipeline_waits);
 }
 
 RendererCanvasRenderRD::CanvasShaderData::~CanvasShaderData() {
 	pipeline_hash_map.clear_pipelines();
+	RendererCanvasRenderRD *renderer = static_cast<RendererCanvasRenderRD *>(RendererCanvasRender::singleton);
+	if (!plain_rect_keys.is_empty()) {
+		renderer->state.shaders_with_plain_keys.erase(this);
+	}
+	if (compilations_tracked) {
+		renderer->state.shaders_with_compilations.erase(this);
+	}
 
 	if (version.is_valid()) {
 		RendererCanvasRenderRD *canvas_singleton = static_cast<RendererCanvasRenderRD *>(RendererCanvasRender::singleton);
@@ -1724,6 +1883,35 @@ void RendererCanvasRenderRD::set_time(double p_time) {
 }
 
 void RendererCanvasRenderRD::update() {
+	// Finished background compilations are released once per frame, so their records do not wait for the next pipeline miss.
+	for (uint32_t i = 0; i < state.shaders_with_compilations.size();) {
+		CanvasShaderData *shader_data = state.shaders_with_compilations[i];
+		if (shader_data->pipeline_hash_map.release_completed_compilations()) {
+			i++;
+		} else {
+			shader_data->compilations_tracked = false;
+			state.shaders_with_compilations.remove_at_unordered(i);
+		}
+	}
+	PipelineCompilationRD::release_completed_retired();
+}
+
+void RendererCanvasRenderRD::mask_created() {
+	_set_masks_in_use();
+}
+
+void RendererCanvasRenderRD::_set_masks_in_use() {
+	if (state.masks_in_use) {
+		return;
+	}
+	state.masks_in_use = true;
+	for (CanvasShaderData *shader_data : state.shaders_with_plain_keys) {
+		for (const PipelineKey &key : shader_data->plain_rect_keys) {
+			_queue_general_mask_pipelines(shader_data, key);
+		}
+		shader_data->plain_rect_keys.reset();
+	}
+	state.shaders_with_plain_keys.reset();
 }
 
 RendererCanvasRenderRD::RendererCanvasRenderRD() {
@@ -1743,9 +1931,12 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 
 	{ //shader variants
 
-		String global_defines;
-		global_defines += "#define MAX_LIGHTS " + itos(MAX_LIGHTS_PER_RENDER) + "\n";
+		String global_defines = "#define MAX_LIGHTS " + itos(MAX_LIGHTS_PER_RENDER) + "\n";
 		global_defines += "\n#define SAMPLERS_BINDING_FIRST_INDEX " + itos(SAMPLERS_BINDING_FIRST_INDEX) + "\n";
+		if (RD::get_singleton()->get_device_vendor_name() == "NVIDIA") {
+			// Indexing push constants per pixel is correct and faster on these devices; others select between constant indexes.
+			global_defines += "\n#define MASK_PER_PIXEL_PUSH_CONSTANT_INDEX\n";
+		}
 
 		state.light_uniforms = memnew_arr(LightUniform, MAX_LIGHTS_PER_RENDER);
 		Vector<String> variants;
@@ -1759,6 +1950,18 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 			variants.push_back(base_define + "#define USE_PRIMITIVE\n#define USE_POINT_SIZE\n"); // SHADER_VARIANT_PRIMITIVE_POINTS
 			variants.push_back(base_define + "#define USE_ATTRIBUTES\n"); // SHADER_VARIANT_ATTRIBUTES
 			variants.push_back(base_define + "#define USE_ATTRIBUTES\n#define USE_POINT_SIZE\n"); // SHADER_VARIANT_ATTRIBUTES_POINTS
+			variants.push_back(base_define + "#define USE_MASKS\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_PAGE_RECT\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_NINEPATCH\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_DOUBLE_MASK\n#define USE_FAST_MASK\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_DOUBLE_MASK\n#define USE_FAST_MASK\n#define USE_PAGE_RECT\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_DOUBLE_MASK\n#define USE_FAST_MASK\n#define USE_NINEPATCH\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_SINGLE_MASK\n#define USE_FAST_MASK\n#define USE_UNIFORM_MASK\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_SINGLE_MASK\n#define USE_FAST_MASK\n#define USE_UNIFORM_MASK\n#define USE_PAGE_RECT\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_SINGLE_MASK\n#define USE_FAST_MASK\n#define USE_UNIFORM_MASK\n#define USE_NINEPATCH\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_DOUBLE_MASK\n#define USE_FAST_MASK\n#define USE_UNIFORM_MASK\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_DOUBLE_MASK\n#define USE_FAST_MASK\n#define USE_UNIFORM_MASK\n#define USE_PAGE_RECT\n");
+			variants.push_back(base_define + "#define USE_MASKS\n#define USE_DOUBLE_MASK\n#define USE_FAST_MASK\n#define USE_UNIFORM_MASK\n#define USE_NINEPATCH\n");
 		}
 
 		shader.canvas_shader.initialize(variants, global_defines, {}, {});
@@ -1834,6 +2037,9 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 
 		actions.render_mode_defines["skip_vertex_transform"] = "#define SKIP_TRANSFORM_USED\n";
 		actions.render_mode_defines["unshaded"] = "#define MODE_UNSHADED\n";
+		actions.render_mode_defines["blend_premul_alpha"] = "#define MASK_PREMULTIPLIED_ALPHA\n";
+		actions.render_mode_defines["blend_mul"] = "#define MASK_BLEND_MULTIPLY\n";
+		actions.render_mode_defines["blend_disabled"] = "#define MASK_BLEND_DISABLED\n";
 		actions.render_mode_defines["light_only"] = "#define MODE_LIGHT_ONLY\n";
 		actions.render_mode_defines["world_vertex_coords"] = "#define USE_WORLD_VERTEX_COORDS\n";
 
@@ -1845,7 +2051,7 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 		actions.base_uniform_string = "material.";
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR;
 		actions.default_repeat = ShaderLanguage::REPEAT_DISABLE;
-		actions.base_varying_index = 9;
+		actions.base_varying_index = 15;
 
 		actions.global_buffer_array_variable = "global_shader_uniforms.data";
 		actions.instance_uniform_index_variable = "read_draw_data_instance_offset";
@@ -2061,6 +2267,7 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 	default_texture_info.normal = info.normal;
 	default_texture_info.specular = info.specular;
 	default_texture_info.sampler = info.sampler;
+	default_texture_info.mipmapped = info.mipmapped;
 
 	state.shadow_texture_size = GLOBAL_GET("rendering/2d/shadow_atlas/size");
 
@@ -2185,6 +2392,14 @@ uint32_t RendererCanvasRenderRD::get_pipeline_compilations(RSE::PipelineSource p
 	RendererCanvasRenderRD *canvas_singleton = static_cast<RendererCanvasRenderRD *>(RendererCanvasRender::singleton);
 	MutexLock lock(canvas_singleton->shader.mutex);
 	return shader.pipeline_compilations[p_source];
+}
+
+uint32_t RendererCanvasRenderRD::get_pipeline_waits() {
+	return shader.pipeline_waits.load(std::memory_order_relaxed);
+}
+
+uint32_t RendererCanvasRenderRD::get_general_mask_batches() {
+	return shader.general_mask_batches.load(std::memory_order_relaxed);
 }
 
 void RendererCanvasRenderRD::_render_batch_items(RenderTarget p_to_render_target, int p_item_count, const Transform2D &p_canvas_transform_inverse, Light *p_lights, bool &r_sdf_used, bool p_to_backbuffer, RenderingServerTypes::RenderInfo *r_render_info) {
@@ -2342,6 +2557,128 @@ void RendererCanvasRenderRD::_render_batch_items(RenderTarget p_to_render_target
 
 	state.current_batch_index = 0;
 	state.canvas_instance_batches.clear();
+	state.batch_masks.clear();
+}
+
+void RendererCanvasRenderRD::_record_mask_uniforms(Batch *&r_batch, bool &r_batch_broken, InstanceData *p_instance, uint16_t p_mask_set, float p_screen_area) {
+	static const BatchMasks no_masks;
+	const BatchMasks *current = r_batch->use_masks ? &state.batch_masks[r_batch->mask_index] : &no_masks;
+	// Large plain and masked rectangles start separate batches, so plain ones skip mask work and masked ones skip presence checks. Small ones stay together because the extra draws cost more than they save.
+	if (p_screen_area >= MASK_SPLIT_MIN_SCREEN_AREA && (p_mask_set != 0 ? r_batch->instance_count > current->masked_instance_count : r_batch->use_masks)) {
+		r_batch = _new_batch(r_batch_broken);
+		current = &no_masks;
+	}
+	if (p_mask_set == 0) {
+		return;
+	}
+	const MaskRow &set = mask_data.rows[p_mask_set];
+	const uint32_t count = set.words[1] != 0 ? 3u : (set.words[0] >> 16) != 0 ? 2u : 1u;
+	float rows[2][16];
+	float descriptors[2][8];
+	uint32_t added_descriptors = 0;
+	for (uint32_t slot = 0; count <= 2 && slot < count; slot++) {
+		const uint32_t entry = (set.words[0] >> (slot * 16)) & 0xffff;
+		memcpy(rows[slot], &mask_data.rows[mask_data.entries_base + (entry - 1) * 4], sizeof(rows[slot]));
+		const float *row = rows[slot];
+		float *data = descriptors[slot];
+		memcpy(data, row + 8, sizeof(float) * 4);
+		const float scale = Math::pow(2.0f, Math::ceil(r_batch->tex_info->mipmapped ? row[7] : 0.0f));
+		data[4] = MIN(row[13] * scale, 0.5f);
+		data[5] = MIN(row[14] * scale, 0.5f);
+		data[6] = r_batch->tex_info->mipmapped ? row[7] : 0.0f;
+		data[7] = row[12] * 4.0f + row[3] * 2.0f + row[15];
+		bool known = slot == 1 && memcmp(data, descriptors[0], sizeof(descriptors[0])) == 0;
+		for (uint32_t index = 0; !known && index < current->mask_uniform_count; index++) {
+			known = memcmp(data, current->mask_uniforms[index], sizeof(descriptors[0])) == 0;
+		}
+		added_descriptors += known ? 0 : 1;
+	}
+	// Shared descriptors hold at most two mask pictures. Start the next batch instead of moving this batch to the per-instance path.
+	if (count > 2 ? current->mask_uniform_count > 0 : current->mask_count > 2 || current->mask_uniform_count + added_descriptors > 2) {
+		r_batch = _new_batch(r_batch_broken);
+	}
+	if (!r_batch->use_masks) {
+		r_batch->use_masks = true;
+		r_batch->mask_index = state.batch_masks.size();
+		state.batch_masks.push_back(BatchMasks());
+	}
+	BatchMasks &masks = state.batch_masks[r_batch->mask_index];
+	masks.masked_instance_count++;
+	masks.mask_count = MAX(masks.mask_count, count);
+	masks.minimum_mask_count = MIN(masks.minimum_mask_count, count);
+	if (count > 2) {
+		masks.mask_uniforms_fit = false;
+		return;
+	}
+	for (uint32_t slot = 0; slot < count; slot++) {
+		masks.masks_valid &= rows[slot][15] != 0.0f;
+	}
+	bool reverse = false;
+	if (count == 2) {
+		const float *first = rows[0];
+		const float *second = rows[1];
+		masks.masks_same_uv &= memcmp(first, second, sizeof(float) * 3) == 0 && memcmp(first + 4, second + 4, sizeof(float) * 3) == 0;
+		reverse = second[15] < first[15];
+		if (first[15] == second[15]) {
+			reverse = second[3] < first[3];
+			if (first[3] == 0.0f && second[3] == 0.0f) {
+				const float first_area = Math::abs(first[0] * first[5] - first[1] * first[4]);
+				const float second_area = Math::abs(second[0] * second[5] - second[1] * second[4]);
+				reverse = second_area > first_area;
+			}
+		}
+		if (reverse) {
+			p_instance->flags |= INSTANCE_FLAGS_MASK_REVERSE;
+		}
+	}
+	if (r_batch->command_type == Item::Command::TYPE_RECT) {
+		if (count == 2) {
+			for (uint32_t slot = 0; slot < 2; slot++) {
+				const float *row = rows[slot];
+				const float basis[4] = { row[0], row[1], row[4], row[5] };
+				if (!masks.mask_basis_set) {
+					memcpy(masks.mask_basis[slot], basis, sizeof(basis));
+				} else {
+					masks.mask_basis_fit &= memcmp(masks.mask_basis[slot], basis, sizeof(basis)) == 0;
+				}
+				p_instance->ninepatch_margins[slot * 2] = row[2];
+				p_instance->ninepatch_margins[slot * 2 + 1] = row[6];
+			}
+			masks.mask_basis_set = true;
+		} else {
+			p_instance->ninepatch_pixel_size[0] = rows[0][0];
+			p_instance->ninepatch_pixel_size[1] = rows[0][1];
+			p_instance->ninepatch_margins[0] = rows[0][2];
+			p_instance->ninepatch_margins[1] = rows[0][4];
+			p_instance->ninepatch_margins[2] = rows[0][5];
+			p_instance->ninepatch_margins[3] = rows[0][6];
+		}
+	}
+	if (!masks.mask_uniforms_fit) {
+		return;
+	}
+	for (uint32_t slot = 0; slot < count; slot++) {
+		const float *data = descriptors[slot];
+		uint32_t index = 0;
+		while (index < masks.mask_uniform_count && memcmp(data, masks.mask_uniforms[index], sizeof(descriptors[slot])) != 0) {
+			index++;
+		}
+		if (index == 2) {
+			masks.mask_uniforms_fit = false;
+			return;
+		}
+		if (index == masks.mask_uniform_count) {
+			memcpy(masks.mask_uniforms[index], data, sizeof(descriptors[slot]));
+			masks.mask_uniform_count++;
+		}
+		const uint32_t target_slot = reverse ? 1 - slot : slot;
+		if (masks.mask_uniform_slot_indices[target_slot] == 2) {
+			masks.mask_uniform_slot_indices[target_slot] = index;
+		} else if (masks.mask_uniform_slot_indices[target_slot] != index) {
+			masks.mask_uniform_slots_fixed = false;
+		}
+		p_instance->flags |= index << (INSTANCE_FLAGS_MASK_INDEX_SHIFT + target_slot);
+	}
 }
 
 void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTarget p_render_target, const Transform2D &p_base_transform, Item *&r_current_clip, Light *p_lights, bool &r_batch_broken, bool &r_sdf_used, Batch *&r_current_batch) {
@@ -2419,7 +2756,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				const bool page_kind_valid = page_owned &&
 						(array_requested
 										? texture_storage->texture_drawable_is_layered(rect->texture) &&
-												rect->array_layer < uint32_t(texture_storage->texture_get_layers(rect->texture))
+												rect->array_layer < 2048 && rect->array_layer < uint32_t(texture_storage->texture_get_layers(rect->texture))
 										: texture_storage->texture_get_type(rect->texture) == RendererRD::TextureStorage::TYPE_2D &&
 												rect->array_layer == 0);
 				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid(page_size, page_mipmap_count);
@@ -2514,6 +2851,9 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				InstanceData *instance_data = new_instance_data(*r_current_batch, template_instance);
+				if (!_record_masks(r_current_batch, r_batch_broken, instance_data, p_item, draw_transform, rect->rect.size)) {
+					break;
+				}
 				Rect2 src_rect(source.position * tex_info->texpixel_size, source.size * tex_info->texpixel_size);
 				Rect2 dst_rect(rect->rect.position, rect->rect.size);
 
@@ -2559,8 +2899,8 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 					instance_data->sampler_domain[1] = sampler_domain.position.y;
 					instance_data->sampler_domain[2] = sampler_domain.size.x;
 					instance_data->sampler_domain[3] = sampler_domain.size.y;
-					instance_data->array_layer = rect->array_layer;
-					instance_data->max_region_lod = rect->max_region_lod;
+					instance_data->item_data |= rect->array_layer | (rect->max_region_lod << 11);
+					instance_data->reserved = 0;
 					instance_data->flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
 					if (use_texture_array) {
 						instance_data->flags |= INSTANCE_FLAGS_USE_ARRAY_LAYER;
@@ -2632,6 +2972,10 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				InstanceData *instance_data = new_instance_data(*r_current_batch, template_instance);
+				// LCD text is not masked, so it also ignores the hidden set of an overflowing mask chain.
+				if (!has_lcd && !_record_masks(r_current_batch, r_batch_broken, instance_data, p_item, draw_transform, rect->rect.size)) {
+					break;
+				}
 				Rect2 src_rect;
 				Rect2 dst_rect;
 
@@ -2725,6 +3069,9 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				InstanceData *instance_data = new_instance_data(*r_current_batch, template_instance);
+				if (!_record_masks(r_current_batch, r_batch_broken, instance_data, p_item, draw_transform, np->rect.size)) {
+					break;
+				}
 
 				Rect2 src_rect;
 				Rect2 dst_rect(np->rect.position.x, np->rect.position.y, np->rect.size.x, np->rect.size.y);
@@ -3217,6 +3564,25 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	PipelineKey pipeline_key;
 	pipeline_key.framebuffer_format_id = p_framebuffer_format;
 	pipeline_key.variant = p_batch->shader_variant;
+	// Batches with one or two masks per rectangle always hold their sampling descriptors in push constants: a third descriptor starts a new batch.
+	static const BatchMasks no_masks;
+	const BatchMasks &masks = p_batch->use_masks ? state.batch_masks[p_batch->mask_index] : no_masks;
+	if (p_batch->use_masks && !p_batch->use_lcd && masks.mask_count > 0) {
+		if (pipeline_key.variant == SHADER_VARIANT_QUAD) {
+			pipeline_key.variant = masks.mask_count > 2 ? SHADER_VARIANT_QUAD_MASK :
+					masks.mask_count == 2 ? SHADER_VARIANT_QUAD_UNIFORM_DOUBLE_MASK : SHADER_VARIANT_QUAD_UNIFORM_SINGLE_MASK;
+		} else if (pipeline_key.variant == SHADER_VARIANT_QUAD_PAGE) {
+			pipeline_key.variant = masks.mask_count > 2 ? SHADER_VARIANT_QUAD_PAGE_MASK :
+					masks.mask_count == 2 ? SHADER_VARIANT_QUAD_PAGE_UNIFORM_DOUBLE_MASK : SHADER_VARIANT_QUAD_PAGE_UNIFORM_SINGLE_MASK;
+		} else if (pipeline_key.variant == SHADER_VARIANT_NINEPATCH) {
+			pipeline_key.variant = masks.mask_count > 2 ? SHADER_VARIANT_NINEPATCH_MASK :
+					masks.mask_count == 2 ? SHADER_VARIANT_NINEPATCH_UNIFORM_DOUBLE_MASK : SHADER_VARIANT_NINEPATCH_UNIFORM_SINGLE_MASK;
+		}
+	}
+	const bool mask_variant = pipeline_key.variant >= SHADER_VARIANT_QUAD_MASK;
+	const bool uniform_masks = pipeline_key.variant >= SHADER_VARIANT_QUAD_UNIFORM_SINGLE_MASK;
+	// Rectangles that did not fit the push constants have no descriptor slot and would sample another mask.
+	DEV_ASSERT(!uniform_masks || masks.mask_uniforms_fit);
 	pipeline_key.render_primitive = p_batch->render_primitive;
 	pipeline_key.shader_specialization.use_lighting = p_batch->use_lighting;
 	pipeline_key.shader_specialization.use_msdf = p_batch->use_msdf;
@@ -3226,6 +3592,20 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	pipeline_key.shader_specialization.use_region_sampling = is_page_batch && p_batch->use_region_sampling;
 	pipeline_key.shader_specialization.region_mip_nearest = is_page_batch && p_batch->region_mip_nearest;
 	pipeline_key.shader_specialization.region_mip_trilinear = is_page_batch && p_batch->region_mip_trilinear;
+	pipeline_key.shader_specialization.mask_mipmaps = mask_variant && p_batch->tex_info->mipmapped;
+	if (uniform_masks) {
+		const bool only_masked = p_batch->instance_count == masks.masked_instance_count;
+		pipeline_key.shader_specialization.mask_all_valid = only_masked && masks.minimum_mask_count == masks.mask_count && masks.masks_valid;
+		pipeline_key.shader_specialization.mask_uniform_slots = masks.mask_uniform_slots_fixed && masks.mask_uniform_slot_indices[0] < 2 && (masks.mask_count == 1 || masks.mask_uniform_slot_indices[1] < 2);
+		pipeline_key.shader_specialization.mask_uniform_indices = pipeline_key.shader_specialization.mask_uniform_slots ? (masks.mask_uniform_slot_indices[0] & 1) | ((masks.mask_uniform_slot_indices[1] & 1) << 1) : 0;
+		pipeline_key.shader_specialization.mask_same_uv = masks.mask_count == 2 && masks.masks_same_uv;
+		pipeline_key.shader_specialization.mask_shared_basis = only_masked && masks.mask_count == 2 && masks.minimum_mask_count == 2 && masks.mask_basis_fit && masks.mask_basis_set && p_batch->command_type == Item::Command::TYPE_RECT;
+		for (uint32_t i = 0; i < masks.mask_uniform_count; i++) {
+			const uint32_t packed = uint32_t(masks.mask_uniforms[i][7]);
+			pipeline_key.shader_specialization.mask_valid_bits |= (packed & 1) << i;
+			pipeline_key.shader_specialization.mask_outside_bits |= ((packed >> 1) & 1) << i;
+		}
+	}
 	pipeline_key.lcd_blend = p_batch->has_blend;
 
 	switch (p_batch->command_type) {
@@ -3235,13 +3615,32 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 			PushConstant push_constant = p_batch->push_constant();
 
 			pipeline_key.vertex_format_id = shader.quad_vertex_format_id;
-			pipeline = _get_pipeline_specialization_or_ubershader(p_shader_data, pipeline_key, push_constant);
+			bool general_masks = false;
+			pipeline = _get_rect_pipeline(p_shader_data, pipeline_key, push_constant, general_masks);
+			if (general_masks) {
+				shader.general_mask_batches.fetch_add(1, std::memory_order_relaxed);
+			}
 			RD::get_singleton()->draw_list_bind_render_pipeline(p_draw_list, pipeline);
 			if (p_batch->has_blend) {
 				RD::get_singleton()->draw_list_set_blend_constants(p_draw_list, p_batch->modulate);
 			}
 
-			RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &push_constant, sizeof(push_constant));
+			if (uniform_masks && !general_masks) {
+				PushConstantMasks mask_constants = {};
+				mask_constants.base = push_constant;
+				for (uint32_t i = 0; i < masks.mask_uniform_count; i++) {
+					const float *data = masks.mask_uniforms[i];
+					memcpy(mask_constants.regions[i], data, sizeof(float) * 4);
+					mask_constants.extras[i][0] = data[4];
+					mask_constants.extras[i][1] = data[5];
+					mask_constants.extras[i][2] = float(uint32_t(data[7]) >> 2);
+					mask_constants.extras[i][3] = data[6];
+				}
+				memcpy(mask_constants.basis, masks.mask_basis, sizeof(mask_constants.basis));
+				RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &mask_constants, sizeof(mask_constants));
+			} else {
+				RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &push_constant, sizeof(push_constant));
+			}
 			FixedVector<RID, 1> vb = { p_batch->instance_buffer };
 			FixedVector<uint64_t, 1> vo = { uint64_t(p_batch->start) * sizeof(InstanceData) };
 			RD::get_singleton()->draw_list_bind_vertex_buffers_format(p_draw_list, shader.quad_vertex_format_id, 1, vb, vo);
@@ -3454,6 +3853,7 @@ RendererCanvasRenderRD::Batch *RendererCanvasRenderRD::_new_batch(bool &r_batch_
 	// Copy the properties of the current batch, we will manually update the things that changed.
 	Batch new_batch = state.canvas_instance_batches[state.current_batch_index];
 	new_batch.instance_count = 0;
+	new_batch.use_masks = false;
 	new_batch.start = state.instance_data_index;
 	memset(&new_batch.push_data, 0, sizeof(new_batch.push_data));
 	state.current_batch_index++;
@@ -3511,6 +3911,7 @@ void RendererCanvasRenderRD::_prepare_batch_texture_info(RID p_texture, TextureS
 	p_info->normal = info.normal;
 	p_info->specular = info.specular;
 	p_info->sampler = info.sampler;
+	p_info->mipmapped = info.mipmapped;
 
 	// cache values to be copied to instance data
 	if (info.specular_color.a < 0.999) {
@@ -3543,6 +3944,9 @@ RendererCanvasRenderRD::~RendererCanvasRenderRD() {
 	material_storage->shader_free(default_clip_children_shader);
 
 	{
+		if (state.mask_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(state.mask_buffer);
+		}
 		if (state.canvas_state_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(state.canvas_state_buffer);
 		}

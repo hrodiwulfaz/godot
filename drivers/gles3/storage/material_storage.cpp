@@ -1242,6 +1242,9 @@ MaterialStorage::MaterialStorage() {
 
 		actions.render_mode_defines["skip_vertex_transform"] = "#define SKIP_TRANSFORM_USED\n";
 		actions.render_mode_defines["unshaded"] = "#define MODE_UNSHADED\n";
+		actions.render_mode_defines["blend_premul_alpha"] = "#define MASK_PREMULTIPLIED_ALPHA\n";
+		actions.render_mode_defines["blend_mul"] = "#define MASK_BLEND_MULTIPLY\n";
+		actions.render_mode_defines["blend_disabled"] = "#define MASK_BLEND_DISABLED\n";
 		actions.render_mode_defines["light_only"] = "#define MODE_LIGHT_ONLY\n";
 		actions.render_mode_defines["world_vertex_coords"] = "#define USE_WORLD_VERTEX_COORDS\n";
 
@@ -2721,6 +2724,12 @@ void CanvasShaderData::set_code(const String &p_code) {
 #endif
 
 	LocalVector<ShaderGLES3::TextureUniformData> texture_uniform_data = get_texture_uniform_data(gen_code.texture_uniforms);
+	int texture_slots = 0;
+	for (const ShaderGLES3::TextureUniformData &texture : texture_uniform_data) {
+		texture_slots += MAX(1, texture.array_size);
+	}
+	ERR_FAIL_COND_MSG(texture_slots > Config::get_singleton()->max_texture_image_units - 10, "Canvas shader textures exceed the available texture units.");
+
 
 	MaterialStorage::get_singleton()->shaders.canvas_shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines, texture_uniform_data);
 	ERR_FAIL_COND(!MaterialStorage::get_singleton()->shaders.canvas_shader.version_is_valid(version));
