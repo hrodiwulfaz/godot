@@ -804,6 +804,16 @@ public:
 
 	/* CANVAS ITEM API */
 
+	virtual RID canvas_mask_create() = 0;
+	virtual void canvas_mask_set_owner(RID p_mask, RID p_canvas_item) = 0;
+	virtual void canvas_mask_set_transform(RID p_mask, const Transform2D &p_unit_to_owner) = 0;
+	virtual void canvas_mask_set_source(RID p_mask, int p_layer, const Rect2 &p_region, int p_max_lod) = 0;
+	virtual void canvas_mask_set_outside_visible(RID p_mask, bool p_visible) = 0;
+	virtual void canvas_item_add_mask(RID p_item, RID p_mask) = 0;
+	virtual void canvas_item_remove_mask(RID p_item, RID p_mask) = 0;
+	virtual void canvas_item_set_mask_excluded(RID p_item, RID p_mask, bool p_excluded) = 0;
+	virtual void canvas_set_mask_page(RID p_texture) = 0;
+
 	virtual RID canvas_item_create() = 0;
 	virtual void canvas_item_set_parent(RID p_item, RID p_parent) = 0;
 

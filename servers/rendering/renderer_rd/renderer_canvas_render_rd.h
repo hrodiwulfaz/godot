@@ -61,6 +61,18 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		SHADER_VARIANT_PRIMITIVE_POINTS,
 		SHADER_VARIANT_ATTRIBUTES,
 		SHADER_VARIANT_ATTRIBUTES_POINTS,
+		SHADER_VARIANT_QUAD_MASK,
+		SHADER_VARIANT_QUAD_PAGE_MASK,
+		SHADER_VARIANT_NINEPATCH_MASK,
+		SHADER_VARIANT_QUAD_DOUBLE_MASK,
+		SHADER_VARIANT_QUAD_PAGE_DOUBLE_MASK,
+		SHADER_VARIANT_NINEPATCH_DOUBLE_MASK,
+		SHADER_VARIANT_QUAD_UNIFORM_SINGLE_MASK,
+		SHADER_VARIANT_QUAD_PAGE_UNIFORM_SINGLE_MASK,
+		SHADER_VARIANT_NINEPATCH_UNIFORM_SINGLE_MASK,
+		SHADER_VARIANT_QUAD_UNIFORM_DOUBLE_MASK,
+		SHADER_VARIANT_QUAD_PAGE_UNIFORM_DOUBLE_MASK,
+		SHADER_VARIANT_NINEPATCH_UNIFORM_DOUBLE_MASK,
 		SHADER_VARIANT_MAX
 	};
 
@@ -69,6 +81,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 		INSTANCE_FLAGS_CLIP_RECT_UV = (1 << 4),
 		INSTANCE_FLAGS_TRANSPOSE_RECT = (1 << 5),
+		INSTANCE_FLAGS_MASK_INDEX_SHIFT = 6,
 
 		INSTANCE_FLAGS_NINEPACH_DRAW_CENTER = (1 << 8),
 		INSTANCE_FLAGS_NINEPATCH_H_MODE_SHIFT = 9,
@@ -78,6 +91,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 		INSTANCE_FLAGS_USE_ARRAY_LAYER = (1U << 29),
 		INSTANCE_FLAGS_USE_REGION_SAMPLING = (1U << 30),
+		INSTANCE_FLAGS_MASK_REVERSE = (1U << 31),
 	};
 
 	enum {
@@ -129,6 +143,14 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 				uint32_t use_region_sampling : 1;
 				uint32_t region_mip_nearest : 1;
 				uint32_t region_mip_trilinear : 1;
+				uint32_t mask_all_valid : 1;
+				uint32_t mask_uniform_slots : 1;
+				uint32_t mask_uniform_indices : 2;
+				uint32_t mask_same_uv : 1;
+				uint32_t mask_valid_bits : 2;
+				uint32_t mask_outside_bits : 2;
+				uint32_t mask_shared_basis : 1;
+				uint32_t mask_mipmaps : 1;
 			};
 		};
 	};
@@ -164,6 +186,10 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		String code;
 		RID version;
 		PipelineHashMapRD<PipelineKey, CanvasShaderData, void (CanvasShaderData::*)(PipelineKey)> pipeline_hash_map;
+		// Plain rectangle pipelines built before the first mask was created. Their general mask pipelines are queued when it is.
+		LocalVector<PipelineKey> plain_rect_keys;
+		// Listed in the renderer's shaders with background compilations.
+		bool compilations_tracked = false;
 
 		static const uint32_t VERTEX_INPUT_MASKS_SIZE = SHADER_VARIANT_MAX * 2;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
@@ -199,6 +225,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		RD::VertexFormatID primitive_vertex_format_id;
 		ShaderCompiler compiler;
 		uint32_t pipeline_compilations[RSE::PIPELINE_SOURCE_MAX] = {};
+		std::atomic<uint32_t> pipeline_waits = { 0 };
+		std::atomic<uint32_t> general_mask_batches = { 0 };
 		Mutex mutex;
 	} shader;
 
@@ -374,8 +402,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 				};
 				float dst_rect[4];
 				float src_rect[4];
-				uint32_t array_layer;
-				uint32_t max_region_lod;
+				uint32_t item_data;
+				uint32_t reserved;
 			};
 			//primitive
 			struct {
@@ -390,8 +418,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	};
 
 	static_assert(sizeof(InstanceData) == 128, "2D instance data struct size must be 128 bytes");
-	static_assert(offsetof(InstanceData, array_layer) == 96, "2D instance array layer must remain at byte 96");
-	static_assert(offsetof(InstanceData, max_region_lod) == 100, "2D instance maximum region LOD must remain at byte 100");
+	static_assert(offsetof(InstanceData, item_data) == 96, "2D instance item data must remain at byte 96");
+	static_assert(offsetof(InstanceData, reserved) == 100, "2D instance reserved word must remain at byte 100");
 	static_assert(offsetof(InstanceData, flags) == 104, "2D instance flags must remain at byte 104");
 	static_assert(offsetof(InstanceData, instance_uniforms_ofs) == 108, "2D instance uniform offset must remain at byte 108");
 
@@ -404,6 +432,14 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		float msdf[2];
 		float color_texture_pixel_size[2];
 	};
+
+	struct PushConstantMasks {
+		PushConstant base;
+		float regions[2][4];
+		float extras[2][4];
+		float basis[2][4];
+	};
+	static_assert(sizeof(PushConstantMasks) <= 128, "2D mask push constants must fit the 128 bytes every Vulkan device guarantees");
 
 	struct PushConstantAttributes {
 		PushConstant base;
@@ -481,6 +517,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	};
 
 	struct TextureInfo {
+		bool mipmapped = false;
 		TextureState state;
 		RID diffuse;
 		RID diffuse_array;
@@ -529,6 +566,25 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 	static constexpr uint32_t PUSH_DATA_INSTANCE_COUNT = 0x8000'0000; // Use high bit to indicate instance data comes from push_data.
 	static constexpr uint32_t INSTANCE_COUNT_MASK = 0x7fff'ffff;
+	static constexpr float MASK_SPLIT_MIN_SCREEN_AREA = 2000.0f; // Screen pixels covered by one rectangle.
+
+	// Mask state of one batch. Only batches with masked rectangles get one, so starting a plain batch copies none of it.
+	struct BatchMasks {
+		uint32_t mask_count = 0;
+		// Mask counts and validity cover masked rectangles only; plain ones are the instances that were not counted as masked.
+		uint32_t masked_instance_count = 0;
+		uint32_t minimum_mask_count = 3;
+		bool masks_valid = true;
+		bool masks_same_uv = true;
+		bool mask_basis_fit = true;
+		bool mask_basis_set = false;
+		float mask_basis[2][4] = {};
+		bool mask_uniforms_fit = true;
+		bool mask_uniform_slots_fixed = true;
+		uint32_t mask_uniform_slot_indices[2] = { 2, 2 };
+		uint32_t mask_uniform_count = 0;
+		float mask_uniforms[2][8] = {};
+	};
 
 	struct Batch {
 		/// First instance index into the instance buffer for this batch.
@@ -556,6 +612,9 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		ShaderVariant shader_variant = SHADER_VARIANT_QUAD;
 		RD::RenderPrimitive render_primitive = RD::RENDER_PRIMITIVE_TRIANGLES;
 		bool use_lighting = false;
+		// Whether the batch holds masked rectangles; their state is batch_masks[mask_index].
+		bool use_masks = false;
+		uint32_t mask_index = 0;
 		bool use_msdf = false;
 		bool use_lcd = false;
 		bool use_texture_array = false;
@@ -636,6 +695,15 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	}
 
 	struct State {
+		RID mask_buffer;
+		RID mask_page;
+		uint32_t mask_capacity = 1024;
+		// Set when the first canvas mask is created or a mask page is set. Until then, plain rectangle pipelines are remembered instead of queueing general mask pipelines.
+		bool masks_in_use = false;
+		LocalVector<CanvasShaderData *> shaders_with_plain_keys;
+		// Shaders whose background compilations are not all released yet. They are checked once per frame.
+		LocalVector<CanvasShaderData *> shaders_with_compilations;
+		LocalVector<RID> mask_uniform_sets;
 		//state buffer
 		struct Buffer {
 			float canvas_transform[16];
@@ -655,9 +723,12 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 			float tex_to_sdf;
 			float shadow_pixel_size;
 			uint32_t flags;
+			uint32_t mask_entries_base;
+			uint32_t mask_padding[3] = {};
 		};
 
 		LocalVector<Batch> canvas_instance_batches;
+		LocalVector<BatchMasks> batch_masks;
 		uint32_t current_batch_index = 0;
 
 		static_assert(std::is_trivially_destructible_v<InstanceData>);
@@ -732,6 +803,24 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 	inline RID _get_pipeline_specialization_or_ubershader(CanvasShaderData *p_shader_data, PipelineKey &r_pipeline_key, PushConstant &r_push_constant, RID p_mesh_instance = RID(), void *p_surface = nullptr, uint32_t p_surface_index = 0, RID *r_vertex_array = nullptr);
 	void _render_batch_items(RenderTarget p_to_render_target, int p_item_count, const Transform2D &p_canvas_transform_inverse, Light *p_lights, bool &r_sdf_used, bool p_to_backbuffer = false, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
+	void _record_mask_uniforms(Batch *&r_batch, bool &r_batch_broken, InstanceData *p_instance, uint16_t p_mask_set, float p_screen_area);
+	// Returns false for rectangles hidden by an invalid mask set; those are not drawn.
+	_FORCE_INLINE_ bool _record_masks(Batch *&r_batch, bool &r_batch_broken, InstanceData *p_instance, const Item *p_item, const Transform2D &p_draw_transform, const Size2 &p_size) {
+		if (likely((p_item->mask_set | uint16_t(r_batch->use_masks)) == 0)) {
+			return true;
+		}
+		if (p_item->mask_set == 1) {
+			return false;
+		}
+		p_instance->item_data = uint32_t(p_item->mask_set) << 16;
+		_record_mask_uniforms(r_batch, r_batch_broken, p_instance, p_item->mask_set, Math::abs(p_item->final_transform.determinant() * p_draw_transform.determinant() * p_size.x * p_size.y));
+		return true;
+	}
+	static const ShaderVariant general_mask_variants[3][2];
+	void _track_compilations(CanvasShaderData *p_shader_data);
+	void _queue_general_mask_pipelines(CanvasShaderData *p_shader_data, const PipelineKey &p_plain_key);
+	void _set_masks_in_use();
+	RID _get_rect_pipeline(CanvasShaderData *p_shader_data, PipelineKey &r_pipeline_key, PushConstant &r_push_constant, bool &r_general_masks);
 	void _record_item_commands(const Item *p_item, RenderTarget p_render_target, const Transform2D &p_base_transform, Item *&r_current_clip, Light *p_lights, bool &r_batch_broken, bool &r_sdf_used, Batch *&r_current_batch);
 	void _render_batch(RD::DrawListID p_draw_list, CanvasShaderData *p_shader_data, RenderingDevice::FramebufferFormatID p_framebuffer_format, Light *p_lights, Batch const *p_batch, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
 	void _prepare_batch_texture_info(RID p_texture, TextureState &p_state, TextureInfo *p_info);
@@ -773,6 +862,9 @@ public:
 
 	void set_debug_redraw(bool p_enabled, double p_time, const Color &p_color) override;
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) override;
+	uint32_t get_pipeline_waits() override;
+	uint32_t get_general_mask_batches() override;
+	void mask_created() override;
 
 	void set_time(double p_time);
 	void update() override;

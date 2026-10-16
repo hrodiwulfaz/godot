@@ -43,15 +43,30 @@ class RendererCanvasCull {
 
 public:
 	struct Item : public RendererCanvasRender::Item {
+		// Only items that use, exclude or own masks allocate this.
+		struct MaskState {
+			Vector<RID> masks;
+			HashSet<RID> excluded_masks;
+			HashSet<RID> owned_masks;
+			uint16_t cached_mask_set = 0;
+			uint16_t cached_inherited_mask_set = 0;
+			uint64_t mask_version = 0;
+			uint64_t cached_mask_version = 0;
+			uint64_t cached_mask_epoch = 0;
+			bool mask_overflow_reported = false;
+		};
 		RID parent; // canvas it belongs to
 		RID self;
 		List<Item *>::Element *E;
 		int z_index;
 		bool z_relative;
 		bool sort_y;
+		// Fills padding, so masks do not grow the item record.
+		uint16_t ysort_mask_set = 0;
 		Color modulate;
 		Color self_modulate;
 		bool use_parent_material;
+		bool update_dependencies = false;
 		int index;
 		bool children_order_dirty;
 		int ysort_children_count;
@@ -81,8 +96,8 @@ public:
 		DependencyTracker dependency_tracker;
 		InstanceUniforms instance_uniforms;
 		SelfList<Item> update_item;
-
-		bool update_dependencies = false;
+		// Takes the place of the padding after the last field, so masks do not grow the item record.
+		MaskState *mask_state = nullptr;
 
 		Item() :
 				update_item(this) {
@@ -103,6 +118,23 @@ public:
 			dependency_tracker.userdata = this;
 			dependency_tracker.changed_callback = &RendererCanvasCull::_dependency_changed;
 			dependency_tracker.deleted_callback = &RendererCanvasCull::_dependency_deleted;
+		}
+
+		// The item owns its mask record, so it is never copied.
+		Item(const Item &) = delete;
+		Item &operator=(const Item &) = delete;
+
+		~Item() {
+			if (mask_state) {
+				memdelete(mask_state);
+			}
+		}
+
+		_FORCE_INLINE_ MaskState *get_mask_state() {
+			if (!mask_state) {
+				mask_state = memnew(MaskState);
+			}
+			return mask_state;
 		}
 	};
 
@@ -190,12 +222,69 @@ public:
 	RID_Owner<Item, true> canvas_item_owner{ 65536, 4194304 };
 	RID_Owner<RendererCanvasRender::Light, true> canvas_light_owner;
 
+	struct Mask {
+		RID owner;
+		HashSet<Item *> users;
+		Transform2D unit_to_owner;
+		Transform2D screen_transform;
+		Rect2 region;
+		int layer = 0;
+		int max_lod = 0;
+		bool outside_visible = false;
+		bool missing_owner_reported = false;
+		bool invalid_layer_reported = false;
+		uint64_t placed_pass = 0;
+		uint64_t entry_pass = 0;
+		uint64_t used_pass = 0;
+		uint16_t entry = 0;
+	};
+	struct MaskSet {
+		uint16_t entries[8] = {};
+		uint64_t used_pass = 0;
+		bool operator==(const MaskSet &p_other) const {
+			return memcmp(entries, p_other.entries, sizeof(entries)) == 0;
+		}
+	};
+	struct MaskSetHasher {
+		static uint32_t hash(const MaskSet &p_set) {
+			uint32_t hash = 5381;
+			for (uint16_t entry : p_set.entries) {
+				hash = hash_djb2_one_32(entry, hash);
+			}
+			return hash;
+		}
+	};
+	RID_Owner<Mask, true> canvas_mask_owner;
+	HashMap<MaskSet, uint16_t, MaskSetHasher> mask_set_lookup;
+	LocalVector<MaskSet> mask_sets;
+	LocalVector<Mask *> mask_entries;
+	// Entries of freed masks, reused by new masks. A full reset runs when many entries are unused and every 256 canvas passes.
+	LocalVector<uint16_t> free_mask_entries;
+	uint64_t mask_pass = 0;
+	uint64_t mask_epoch = 0;
+	bool reset_mask_sets = true;
+	bool mask_sets_dirty = true;
+	LocalVector<uint16_t> used_mask_entries;
+	RID mask_page;
+	_FORCE_INLINE_ uint16_t _resolve_mask_set(Item *p_item, uint16_t p_inherited) {
+		if (likely(!p_item->mask_state) || p_inherited == 1) {
+			return p_inherited;
+		}
+		return _resolve_item_mask_set(p_item, p_inherited);
+	}
+	uint16_t _resolve_item_mask_set(Item *p_item, uint16_t p_inherited);
+	void _place_owned_masks(Item *p_item, const Transform2D &p_transform);
+	uint16_t _build_mask_set(Item *p_item, uint16_t p_inherited);
+	void _write_mask_rows(RendererCanvasRender::Item *p_list);
+	void _write_mask_entry(Mask *p_mask, const Size2 &p_page_size, int p_page_layers, int p_page_mipmaps, RendererCanvasRender::MaskRow *r_rows);
+
 	template <typename T>
 	void _free_rids(T &p_owner, const char *p_type);
 
 	bool disable_scale;
 	bool sdf_used = false;
 	bool snapping_2d_transforms_to_pixel = false;
+	bool snapping_2d_vertices_to_pixel = false;
 
 	bool debug_redraw = false;
 	double debug_redraw_time = 0;
@@ -208,9 +297,9 @@ public:
 
 private:
 	void _render_canvas_item_tree(RID p_to_render_target, Canvas::ChildItem *p_child_items, int p_child_item_count, const Transform2D &p_transform, const Rect2 &p_clip_rect, const Color &p_modulate, RendererCanvasRender::Light *p_lights, RendererCanvasRender::Light *p_directional_lights, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, uint32_t p_canvas_cull_mask, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
-	void _cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item);
+	void _cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item, uint16_t p_mask_set = 0);
 
-	void _collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask);
+	void _collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask, uint16_t p_mask_set);
 	int _count_ysort_children(RendererCanvasCull::Item *p_canvas_item);
 	void _mark_ysort_dirty(RendererCanvasCull::Item *ysort_owner);
 
@@ -236,6 +325,16 @@ public:
 	void canvas_set_disable_scale(bool p_disable);
 
 	RID canvas_item_allocate();
+	RID canvas_mask_allocate();
+	void canvas_mask_initialize(RID p_rid);
+	void canvas_mask_set_owner(RID p_mask, RID p_canvas_item);
+	void canvas_mask_set_transform(RID p_mask, const Transform2D &p_unit_to_owner);
+	void canvas_mask_set_source(RID p_mask, int p_layer, const Rect2 &p_region, int p_max_lod);
+	void canvas_mask_set_outside_visible(RID p_mask, bool p_visible);
+	void canvas_item_add_mask(RID p_item, RID p_mask);
+	void canvas_item_remove_mask(RID p_item, RID p_mask);
+	void canvas_item_set_mask_excluded(RID p_item, RID p_mask, bool p_excluded);
+	void canvas_set_mask_page(RID p_texture);
 	void canvas_item_initialize(RID p_rid);
 
 	void canvas_item_set_parent(RID p_item, RID p_parent);

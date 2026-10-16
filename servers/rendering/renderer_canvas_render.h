@@ -39,6 +39,16 @@ class RendererCanvasRender {
 public:
 	static RendererCanvasRender *singleton;
 
+	struct MaskRow {
+		uint32_t words[4];
+	};
+	struct MaskData {
+		Vector<MaskRow> rows;
+		LocalVector<uint32_t> changed_rows;
+		uint32_t entries_base = 0;
+		RID page;
+	} mask_data;
+
 	enum CanvasRectFlags {
 		CANVAS_RECT_REGION = 1,
 		CANVAS_RECT_TILE = 2,
@@ -370,6 +380,7 @@ public:
 
 		CanvasGroup *canvas_group = nullptr;
 		bool use_canvas_group = false;
+		uint16_t mask_set = 0;
 		int light_mask;
 		int z_final;
 
@@ -585,6 +596,10 @@ public:
 
 	virtual void set_debug_redraw(bool p_enabled, double p_time, const Color &p_color) = 0;
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) = 0;
+	virtual uint32_t get_pipeline_waits() { return 0; }
+	virtual uint32_t get_general_mask_batches() { return 0; }
+	// Called on the render thread when a canvas mask is created.
+	virtual void mask_created() {}
 
 	RendererCanvasRender() {
 		ERR_FAIL_COND_MSG(singleton != nullptr, "A RendererCanvasRender singleton already exists.");

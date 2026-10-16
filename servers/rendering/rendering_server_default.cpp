@@ -321,6 +321,10 @@ uint64_t RenderingServerDefault::get_rendering_info(RSE::RenderingInfo p_info) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_DRAW) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_DRAW);
 	} else if (p_info == RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION);
+	} else if (p_info == RSE::RENDERING_INFO_PIPELINE_WAITS_CANVAS) {
+		return RSG::canvas_render->get_pipeline_waits();
+	} else if (p_info == RSE::RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS) {
+		return RSG::canvas_render->get_general_mask_batches();
 	}
 	return RSG::utilities->get_rendering_info(p_info);
 }

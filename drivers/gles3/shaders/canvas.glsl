@@ -15,6 +15,7 @@ USE_PAGE_RECT = false
 USE_TEXTURE_ARRAY = false
 REGION_MIP_NEAREST = false
 REGION_MIP_TRILINEAR = false
+USE_MASKS = false
 
 #[vertex]
 
@@ -83,8 +84,9 @@ layout(location = 15) in highp uvec4 attrib_H;
 #define read_draw_data_ninepatch_margins attrib_D
 #define read_draw_data_dst_rect attrib_E
 #define read_draw_data_src_rect attrib_F
-#define read_draw_data_array_layer attrib_G.x
-#define read_draw_data_max_region_lod attrib_G.y
+#define read_draw_data_item_data attrib_G.x
+#define read_draw_data_array_layer (read_draw_data_item_data & 0x7FFu)
+#define read_draw_data_max_region_lod ((read_draw_data_item_data >> 11u) & 0x1Fu)
 
 #endif
 
@@ -105,10 +107,12 @@ flat out vec2 varying_D;
 flat out vec4 varying_E;
 #endif
 #endif
-flat out uvec2 varying_F;
+flat out uvec3 varying_F;
 flat out uvec4 varying_G;
-#ifdef USE_PAGE_RECT
-flat out highp uvec2 varying_H;
+#ifdef USE_MASKS
+out highp vec2 mask_uv_interp;
+flat out highp vec4 mask_region_interp;
+flat out highp vec4 mask_extra_interp;
 #endif
 
 // This needs to be outside clang-format so the ubo comment is in the right place
@@ -151,10 +155,10 @@ void main() {
 #endif // !USE_ATTRIBUTES
 #endif // USE_PRIMITIVE
 
-	varying_F = uvec2(read_draw_data_flags, read_draw_data_instance_offset);
+	varying_F = uvec3(read_draw_data_flags, read_draw_data_instance_offset, 0u);
 	varying_G = read_draw_data_lights;
-#ifdef USE_PAGE_RECT
-	varying_H = uvec2(read_draw_data_array_layer, read_draw_data_max_region_lod);
+#if defined(USE_MASKS) || defined(USE_PAGE_RECT)
+	varying_F.z = read_draw_data_item_data;
 #endif
 
 	vec4 instance_custom = vec4(0.0);
@@ -289,6 +293,25 @@ void main() {
 	vertex_interp = vertex;
 	uv_interp = uv;
 
+#ifdef USE_MASKS
+	mask_uv_interp = vec2(0.0);
+	mask_region_interp = vec4(0.0);
+	mask_extra_interp = vec4(0.0, 0.0, 0.0, -1.0);
+	uint mask_set = read_draw_data_item_data >> 16u;
+	if (mask_set > 1u) {
+		uvec4 indices = read_mask_row(mask_set);
+		if ((indices.x >> 16u) == 0u) {
+			uint base = mask_entries_base + ((indices.x & 0xFFFFu) - 1u) * 4u;
+			vec4 row_x = uintBitsToFloat(read_mask_row(base));
+			vec4 row_y = uintBitsToFloat(read_mask_row(base + 1u));
+			vec4 extra = uintBitsToFloat(read_mask_row(base + 3u));
+			mask_uv_interp = vec2(dot(row_x.xyz, vec3(vertex, 1.0)), dot(row_y.xyz, vec3(vertex, 1.0)));
+			mask_region_interp = uintBitsToFloat(read_mask_row(base + 2u));
+			mask_extra_interp = vec4(min(extra.yz * exp2(ceil(mask_mipmaps ? row_y.w : 0.0)), vec2(0.5)), row_y.w, extra.x * 4.0 + row_x.w * 2.0 + extra.w);
+		}
+	}
+#endif
+
 	gl_Position = screen_transform * vec4(vertex, 0.0, 1.0);
 
 #ifdef USE_POINT_SIZE
@@ -304,6 +327,12 @@ void main() {
 in vec2 uv_interp;
 in vec2 vertex_interp;
 in vec4 color_interp;
+
+#ifdef USE_MASKS
+in highp vec2 mask_uv_interp;
+flat in highp vec4 mask_region_interp;
+flat in highp vec4 mask_extra_interp;
+#endif
 
 #ifdef USE_NINEPATCH
 
@@ -335,12 +364,12 @@ flat in vec4 varying_E;
 #endif // USE_ATTRIBUTES
 #endif // USE_PRIMITIVE
 
-flat in uvec2 varying_F;
+flat in uvec3 varying_F;
 flat in uvec4 varying_G;
-#ifdef USE_PAGE_RECT
-flat in highp uvec2 varying_H;
-#define read_draw_data_array_layer varying_H.x
-#define read_draw_data_max_region_lod varying_H.y
+#if defined(USE_MASKS) || defined(USE_PAGE_RECT)
+#define read_draw_data_item_data varying_F.z
+#define read_draw_data_array_layer (read_draw_data_item_data & 0x7FFu)
+#define read_draw_data_max_region_lod ((read_draw_data_item_data >> 11u) & 0x1Fu)
 #endif
 #define read_draw_data_flags varying_F.x
 #define read_draw_data_instance_offset varying_F.y
@@ -376,6 +405,7 @@ layout(std140) uniform MaterialUniforms{ //ubo:4
 /* clang-format on */
 
 #GLOBALS
+
 
 float vec4_to_float(vec4 p_vec) {
 	return dot(p_vec, vec4(1.0 / (255.0 * 255.0 * 255.0), 1.0 / (255.0 * 255.0), 1.0 / 255.0, 1.0)) * 2.0 - 1.0;
@@ -660,6 +690,34 @@ vec4 texture_page_lod(highp vec2 p_uv, highp float p_lod) {
 }
 #endif
 
+#ifdef USE_MASKS
+float sample_mask(vec2 p_uv, vec4 p_region, vec2 p_margin, float p_layer, float p_lod, float p_outside) {
+	if (all(greaterThanEqual(p_uv, vec2(0.0))) && all(lessThan(p_uv, vec2(1.0)))) {
+		vec2 sample_uv = p_region.xy + clamp(p_uv, p_margin, vec2(1.0) - p_margin) * p_region.zw;
+		return textureLod(mask_page, vec3(sample_uv, p_layer), p_lod).a;
+	}
+	return p_outside;
+}
+
+float sample_mask_entry(uint p_entry) {
+	if (p_entry == 0u) {
+		return 1.0;
+	}
+	uint base = mask_entries_base + (p_entry - 1u) * 4u;
+	vec4 extra = uintBitsToFloat(read_mask_row(base + 3u));
+	if (extra.w == 0.0) {
+		return 0.0;
+	}
+	vec4 row_x = uintBitsToFloat(read_mask_row(base));
+	vec4 row_y = uintBitsToFloat(read_mask_row(base + 1u));
+	vec4 region = uintBitsToFloat(read_mask_row(base + 2u));
+	vec3 position = vec3(vertex_interp, 1.0);
+	vec2 mask_uv = vec2(dot(row_x.xyz, position), dot(row_y.xyz, position));
+	vec2 margin = min(extra.yz * exp2(ceil(mask_mipmaps ? row_y.w : 0.0)), vec2(0.5));
+	return sample_mask(mask_uv, region, margin, extra.x, row_y.w, row_x.w);
+}
+#endif
+
 void main() {
 	vec4 color = color_interp;
 	vec2 uv = uv_interp;
@@ -822,6 +880,36 @@ void main() {
 		normal = normalize((canvas_normal_transform * vec4(normal, 0.0)).xyz);
 	}
 
+#ifdef USE_MASKS
+	float coverage = 1.0;
+	uint mask_set = read_draw_data_item_data >> 16u;
+	if (mask_set != 0u) {
+		if (mask_set == 1u) {
+			discard;
+		}
+		if (mask_extra_interp.w >= 0.0) {
+			uint mask_flags = uint(mask_extra_interp.w);
+			coverage = (mask_flags & 1u) == 0u ? 0.0 : sample_mask(mask_uv_interp, mask_region_interp, mask_extra_interp.xy, float(mask_flags >> 2u), mask_extra_interp.z, float((mask_flags >> 1u) & 1u));
+		} else {
+			uvec4 indices = read_mask_row(mask_set);
+			coverage *= sample_mask_entry(indices.x & 0xFFFFu);
+			coverage *= sample_mask_entry(indices.x >> 16u);
+			coverage *= sample_mask_entry(indices.y & 0xFFFFu);
+			coverage *= sample_mask_entry(indices.y >> 16u);
+			coverage *= sample_mask_entry(indices.z & 0xFFFFu);
+			coverage *= sample_mask_entry(indices.z >> 16u);
+			coverage *= sample_mask_entry(indices.w & 0xFFFFu);
+			coverage *= sample_mask_entry(indices.w >> 16u);
+		}
+#if defined(MASK_BLEND_DISABLED) || defined(MASK_BLEND_MULTIPLY)
+		if (coverage == 0.0) {
+			discard;
+		}
+#endif
+		color.a *= coverage;
+	}
+#endif
+
 	vec4 base_color = color;
 
 #ifdef MODE_LIGHT_ONLY
@@ -978,6 +1066,14 @@ void main() {
 
 #ifdef MODE_LIGHT_ONLY
 	color.a *= light_only_alpha;
+#endif
+
+#ifdef USE_MASKS
+#ifdef MASK_PREMULTIPLIED_ALPHA
+	color.rgb *= coverage;
+#elif defined(MASK_BLEND_MULTIPLY)
+	color.rgb = mix(vec3(1.0), color.rgb, coverage);
+#endif
 #endif
 
 	frag_color = color;

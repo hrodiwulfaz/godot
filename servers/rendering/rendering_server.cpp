@@ -3320,6 +3320,15 @@ void RenderingServer::_bind_methods() {
 
 	/* CANVAS ITEM */
 
+	ClassDB::bind_method(D_METHOD("canvas_mask_create"), &RenderingServer::canvas_mask_create);
+	ClassDB::bind_method(D_METHOD("canvas_mask_set_owner", "mask", "canvas_item"), &RenderingServer::canvas_mask_set_owner);
+	ClassDB::bind_method(D_METHOD("canvas_mask_set_transform", "mask", "unit_to_owner"), &RenderingServer::canvas_mask_set_transform);
+	ClassDB::bind_method(D_METHOD("canvas_mask_set_source", "mask", "layer", "region", "max_lod"), &RenderingServer::canvas_mask_set_source);
+	ClassDB::bind_method(D_METHOD("canvas_mask_set_outside_visible", "mask", "visible"), &RenderingServer::canvas_mask_set_outside_visible);
+	ClassDB::bind_method(D_METHOD("canvas_item_add_mask", "item", "mask"), &RenderingServer::canvas_item_add_mask);
+	ClassDB::bind_method(D_METHOD("canvas_item_remove_mask", "item", "mask"), &RenderingServer::canvas_item_remove_mask);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_mask_excluded", "item", "mask", "excluded"), &RenderingServer::canvas_item_set_mask_excluded);
+	ClassDB::bind_method(D_METHOD("canvas_set_mask_page", "texture"), &RenderingServer::canvas_set_mask_page);
 	ClassDB::bind_method(D_METHOD("canvas_item_create"), &RenderingServer::canvas_item_create);
 	ClassDB::bind_method(D_METHOD("canvas_item_set_parent", "item", "parent"), &RenderingServer::canvas_item_set_parent);
 	ClassDB::bind_method(D_METHOD("canvas_item_set_default_texture_filter", "item", "filter"), &RenderingServer::canvas_item_set_default_texture_filter);
@@ -3560,6 +3569,8 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SURFACE);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_DRAW);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_WAITS_CANVAS);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS);
 
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_CANVAS);
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_MESH);

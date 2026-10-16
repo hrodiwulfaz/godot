@@ -1045,6 +1045,16 @@ public:
 	FUNC2(canvas_texture_set_texture_filter, RID, RSE::CanvasItemTextureFilter)
 	FUNC2(canvas_texture_set_texture_repeat, RID, RSE::CanvasItemTextureRepeat)
 
+	FUNCRIDSPLIT(canvas_mask)
+	FUNC2(canvas_mask_set_owner, RID, RID)
+	FUNC2(canvas_mask_set_transform, RID, const Transform2D &)
+	FUNC4(canvas_mask_set_source, RID, int, const Rect2 &, int)
+	FUNC2(canvas_mask_set_outside_visible, RID, bool)
+	FUNC2(canvas_item_add_mask, RID, RID)
+	FUNC2(canvas_item_remove_mask, RID, RID)
+	FUNC3(canvas_item_set_mask_excluded, RID, RID, bool)
+	FUNC1(canvas_set_mask_page, RID)
+
 	FUNCRIDSPLIT(canvas_item)
 	FUNC2(canvas_item_set_parent, RID, RID)
 
