@@ -70,6 +70,8 @@ public:
 	virtual void draw_rect(RID p_canvas_item, const Rect2 &p_rect, bool p_tile = false, const Color &p_modulate = Color(1, 1, 1), bool p_transpose = false) const override;
 	virtual void draw_rect_region(RID p_canvas_item, const Rect2 &p_rect, const Rect2 &p_src_rect, const Color &p_modulate = Color(1, 1, 1), bool p_transpose = false, bool p_clip_uv = true) const override;
 	virtual bool get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, Rect2 &r_rect, Rect2 &r_src_rect) const override;
+	// Same as get_rect_region, for a draw that is transposed: the destination axes are the source axes swapped.
+	bool get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, bool p_transpose, Rect2 &r_rect, Rect2 &r_src_rect) const;
 	// Destination offset of a clipped source inside a source rectangle. p_scale is the signed destination size per
 	// source pixel in source axes; negative scales are flips. A transposed draw maps source y to destination x.
 	static Vector2 get_clipped_draw_offset(const Rect2 &p_src_rect, const Rect2 &p_clipped_src_rect, const Vector2 &p_scale, bool p_transpose);

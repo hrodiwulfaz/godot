@@ -163,7 +163,8 @@ void AtlasTexture::draw(RID p_canvas_item, const Point2 &p_pos, const Color &p_m
 		return;
 	}
 	const Rect2 rc = _get_region_rect();
-	atlas->draw_rect_region(p_canvas_item, Rect2(p_pos + margin.position, rc.size), rc, p_modulate, p_transpose, filter_clip);
+	const Vector2 offset = p_transpose ? Vector2(margin.position.y, margin.position.x) : margin.position;
+	atlas->draw_rect_region(p_canvas_item, Rect2(p_pos + offset, rc.size), rc, p_modulate, p_transpose, filter_clip);
 }
 
 void AtlasTexture::draw_rect(RID p_canvas_item, const Rect2 &p_rect, bool p_tile, const Color &p_modulate, bool p_transpose) const {
@@ -175,20 +176,19 @@ void AtlasTexture::draw_rect(RID p_canvas_item, const Rect2 &p_rect, bool p_tile
 
 	Rect2 dr;
 	Rect2 src_c;
-	if (get_rect_region(p_rect, src_rect, dr, src_c)) {
+	if (get_rect_region(p_rect, src_rect, p_transpose, dr, src_c)) {
 		atlas->draw_rect_region(p_canvas_item, dr, src_c, p_modulate, p_transpose, filter_clip);
 	}
 }
 
 void AtlasTexture::draw_rect_region(RID p_canvas_item, const Rect2 &p_rect, const Rect2 &p_src_rect, const Color &p_modulate, bool p_transpose, bool p_clip_uv) const {
-	// This might not necessarily work well if using a rect, needs to be fixed properly.
 	if (atlas.is_null()) {
 		return;
 	}
 
 	Rect2 dr;
 	Rect2 src_c;
-	if (get_rect_region(p_rect, p_src_rect, dr, src_c)) {
+	if (get_rect_region(p_rect, p_src_rect, p_transpose, dr, src_c)) {
 		atlas->draw_rect_region(p_canvas_item, dr, src_c, p_modulate, p_transpose, filter_clip);
 	}
 }
@@ -216,6 +216,10 @@ Vector2 AtlasTexture::get_clipped_draw_offset(const Rect2 &p_src_rect, const Rec
 }
 
 bool AtlasTexture::get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, Rect2 &r_rect, Rect2 &r_src_rect) const {
+	return get_rect_region(p_rect, p_src_rect, false, r_rect, r_src_rect);
+}
+
+bool AtlasTexture::get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, bool p_transpose, Rect2 &r_rect, Rect2 &r_src_rect) const {
 	if (atlas.is_null()) {
 		return false;
 	}
@@ -235,15 +239,7 @@ bool AtlasTexture::get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect,
 		return false;
 	}
 
-	Vector2 ofs = (src_clipped.position - src.position);
-	if (scale.x < 0) {
-		ofs.x += (src_clipped.size.x - src.size.x);
-	}
-	if (scale.y < 0) {
-		ofs.y += (src_clipped.size.y - src.size.y);
-	}
-
-	r_rect = Rect2(p_rect.position + ofs * scale, src_clipped.size * scale);
+	r_rect = Rect2(p_rect.position + get_clipped_draw_offset(src, src_clipped, scale, p_transpose), src_clipped.size * scale);
 	r_src_rect = src_clipped;
 	return true;
 }
