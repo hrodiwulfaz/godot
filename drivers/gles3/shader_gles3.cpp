@@ -305,6 +305,7 @@ void ShaderGLES3::_get_uniform_locations(Version::Specialization &spec, Version 
 }
 
 void ShaderGLES3::_compile_specialization(Version::Specialization &spec, uint32_t p_variant, Version *p_version, uint64_t p_specialization) {
+	compilation_count.fetch_add(1, std::memory_order_relaxed);
 	spec.id = glCreateProgram();
 	spec.ok = false;
 	GLint status;

@@ -49,6 +49,68 @@ public:
 		RID page;
 	} mask_data;
 
+	// Packed deform word of an item and of a rectangle instance (the reserved word at byte 100): the chain index,
+	// the item's deform flags and one bit per mask slot whose mask follows the bend. The recorder consumes the
+	// item flags to select grid density and index order, and clears them in the instance word.
+	static constexpr uint32_t DEFORM_CHAIN_MASK = 0x3FFFFFu;
+	static constexpr uint32_t DEFORM_TIP_UNDER = 1u << 22;
+	static constexpr uint32_t DEFORM_DENSE_GRID = 1u << 23;
+	static constexpr uint32_t DEFORM_FLAGS_SHIFT = 22;
+	static constexpr uint32_t DEFORM_INHERITED_MASK = 0xFFFFFFu;
+	static constexpr uint32_t DEFORM_MASK_FOLLOW_SHIFT = 24;
+	static constexpr uint32_t DEFORM_MAX_JOINTS = 8;
+	static constexpr uint32_t DEFORM_MAX_LEVELS = 4;
+	static constexpr uint32_t DEFORM_MAX_WARP_SIZE = 16;
+	static constexpr uint32_t DEFORM_GRID_KIND_COUNT = 3;
+	static constexpr uint32_t DEFORM_GRID_REVERSE_ROWS = 1;
+	static constexpr uint32_t DEFORM_GRID_REVERSE_COLUMNS = 2;
+	static constexpr uint32_t DEFORM_GRID_ORDER_COUNT = 4;
+	static constexpr uint32_t DEFORM_GRID_COUNT = DEFORM_GRID_KIND_COUNT * DEFORM_GRID_ORDER_COUNT;
+	static constexpr uint32_t DEFORM_GRID_RUN_KIND_BITS = 4;
+	static constexpr uint32_t DEFORM_GRID_RUN_KIND_MASK = (1u << DEFORM_GRID_RUN_KIND_BITS) - 1;
+	static _FORCE_INLINE_ uint32_t deform_grid_vertex(uint32_t p_x, uint32_t p_y, uint32_t p_columns, uint32_t p_rows, uint32_t p_order) {
+		return ((p_order & DEFORM_GRID_REVERSE_ROWS) ? p_rows - p_y : p_y) * (p_columns + 1) + ((p_order & DEFORM_GRID_REVERSE_COLUMNS) ? p_columns - p_x : p_x);
+	}
+	static constexpr uint32_t DEFORM_GRID_COLUMNS = 4;
+	static constexpr uint32_t DEFORM_GRID_ROWS = 16;
+	static constexpr uint32_t DEFORM_DENSE_GRID_ROWS = 32;
+	// Grids of rectangles that a warp crosses: more lines than any warp (DEFORM_MAX_WARP_SIZE points inside the
+	// rectangle and its two edges), so every warp line is a grid line, plus lines for the joint bands.
+	static constexpr uint32_t DEFORM_WARP_GRID_COLUMNS = 24;
+	static constexpr uint32_t DEFORM_WARP_GRID_ROWS = 32;
+	// Plain runs of at most this many rectangles between grid runs of the same kind are drawn with the grid.
+	static constexpr uint32_t DEFORM_MERGE_PLAIN = 4;
+	// Chain words: the record row offset plus one in the low 24 bits; the high byte of word w holds the follow codes of
+	// mask slots 2w and 2w + 1, three bits each. Code 0: the mask stays; code 1 + n: the mask is sampled where the
+	// first n records of the chain have moved the point, so it follows the bend of the remaining, outer records.
+	static constexpr uint32_t DEFORM_RECORD_MASK = 0xFFFFFFu;
+	static constexpr uint32_t DEFORM_FOLLOW_CODE_SHIFT = 24;
+	static constexpr uint32_t DEFORM_FOLLOW_CODE_BITS = 3;
+
+	// Per canvas pass: chains (4 words each, see DEFORM_RECORD_MASK; chain 0 is empty), then records from row
+	// record_base. A record is the owner's canvas-space basis and origin, joint and warp counts, warp strength and
+	// rectangle, two rows per joint (pivot, axis; angle, blend, stretch, segment) and the warp offsets.
+	struct DeformData {
+		LocalVector<float> rows;
+		uint32_t record_base = 0;
+	} deform_data;
+
+	// Follow code of mask slot p_slot in chain p_chain (see DEFORM_RECORD_MASK).
+	uint32_t deform_follow_code(uint32_t p_chain, uint32_t p_slot) const;
+
+	enum DeformRectKind {
+		DEFORM_RECT_GRID,
+		DEFORM_RECT_WARP_GRID,
+		DEFORM_RECT_STILL,
+		DEFORM_RECT_RIGID,
+	};
+	// Classifies one rectangle of an item with a deform chain, like the canvas shaders deform it. p_world maps
+	// rectangle space to canvas space; for DEFORM_RECT_RIGID, r_move is the canvas-space transform that moves the
+	// whole rectangle, so it is drawn as a plain quad. A rectangle that a warp crosses is DEFORM_RECT_WARP_GRID.
+	DeformRectKind deform_classify_rect(uint32_t p_chain, const Transform2D &p_world, const Rect2 &p_rect, Transform2D &r_move) const;
+	// Selects one of the four index orders; unflagged rectangles retain the original order.
+	uint32_t deform_rect_order(uint32_t p_deform, const Transform2D &p_world, const Rect2 &p_rect, const Vector2 &p_source_size, bool p_warp) const;
+
 	enum CanvasRectFlags {
 		CANVAS_RECT_REGION = 1,
 		CANVAS_RECT_TILE = 2,
@@ -391,6 +453,9 @@ public:
 		RID skeleton;
 
 		int32_t instance_allocated_shader_uniforms_offset = -1;
+		// Deform of this item in the current canvas pass, packed as in DEFORM_*: chain, flags, masks that follow.
+		// Takes the place of padding, so deforms do not grow the item record.
+		uint32_t deform = 0;
 
 		Item *next = nullptr;
 
@@ -598,6 +663,7 @@ public:
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) = 0;
 	virtual uint32_t get_pipeline_waits() { return 0; }
 	virtual uint32_t get_general_mask_batches() { return 0; }
+	virtual uint32_t get_compiling_shader_count() { return 0; }
 	// Called on the render thread when a canvas mask is created.
 	virtual void mask_created() {}
 

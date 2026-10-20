@@ -813,6 +813,12 @@ public:
 	virtual void canvas_item_remove_mask(RID p_item, RID p_mask) = 0;
 	virtual void canvas_item_set_mask_excluded(RID p_item, RID p_mask, bool p_excluded) = 0;
 	virtual void canvas_set_mask_page(RID p_texture) = 0;
+	virtual void canvas_item_set_deform_joints(RID p_item, const Vector<float> &p_joints) = 0;
+	virtual void canvas_item_set_deform_angles(RID p_item, const Vector<float> &p_angles) = 0;
+	virtual void canvas_item_set_deform_stretch(RID p_item, const Vector<float> &p_stretch) = 0;
+	virtual void canvas_item_set_deform_warp(RID p_item, int p_columns, int p_rows, const Rect2 &p_rect, const Vector<Vector2> &p_offsets, float p_strength) = 0;
+	virtual void canvas_item_set_deform_flags(RID p_item, BitField<RSE::CanvasDeformFlags> p_flags) = 0;
+	virtual void canvas_item_set_deform_excluded(RID p_item, bool p_excluded) = 0;
 
 	virtual RID canvas_item_create() = 0;
 	virtual void canvas_item_set_parent(RID p_item, RID p_parent) = 0;
@@ -1176,6 +1182,7 @@ VARIANT_ENUM_CAST_EXT(RSE::VisibilityRangeFadeMode, RenderingServer::VisibilityR
 VARIANT_ENUM_CAST_EXT(RSE::NinePatchAxisMode, RenderingServer::NinePatchAxisMode);
 VARIANT_ENUM_CAST_EXT(RSE::CanvasItemTextureFilter, RenderingServer::CanvasItemTextureFilter);
 VARIANT_ENUM_CAST_EXT(RSE::CanvasItemTextureRepeat, RenderingServer::CanvasItemTextureRepeat);
+VARIANT_BITFIELD_CAST_EXT(RSE::CanvasDeformFlags, RenderingServer::CanvasDeformFlags);
 VARIANT_ENUM_CAST_EXT(RSE::CanvasGroupMode, RenderingServer::CanvasGroupMode);
 VARIANT_ENUM_CAST_EXT(RSE::CanvasLightMode, RenderingServer::CanvasLightMode);
 VARIANT_ENUM_CAST_EXT(RSE::CanvasLightBlendMode, RenderingServer::CanvasLightBlendMode);

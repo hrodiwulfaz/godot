@@ -55,6 +55,41 @@ public:
 			uint64_t cached_mask_epoch = 0;
 			bool mask_overflow_reported = false;
 		};
+		// Only items that own a deform record, set deform flags or drop inherited deforms allocate this.
+		struct DeformState {
+			// Record layout, 8 floats per joint: pivot x, y, axis x, y, angle, blend, stretch, segment.
+			LocalVector<float> joints;
+			LocalVector<Vector2> warp_offsets;
+			Rect2 warp_rect;
+			uint32_t warp_columns = 0;
+			uint32_t warp_rows = 0;
+			float warp_strength = 0.0f;
+			uint32_t flags = 0;
+			bool excluded = false;
+			// A warp, or a joint that turns or stretches, decided whenever the values change. A record that moves
+			// nothing is not written, so a rig at rest costs its item and children nothing.
+			bool moving = false;
+			uint64_t pass = 0;
+			uint32_t record = 0;
+			uint32_t inherited = 0;
+			uint32_t resolved = 0;
+
+			_FORCE_INLINE_ bool has_record() const { return !joints.is_empty() || warp_columns != 0; }
+			_FORCE_INLINE_ bool is_empty() const { return !has_record() && flags == 0 && !excluded; }
+			// Flags and exclusion change only an inherited chain.
+			_FORCE_INLINE_ bool keeps_inherited() const { return flags == 0 && !excluded; }
+			bool moves() const {
+				if (warp_columns != 0) {
+					return true;
+				}
+				for (uint32_t i = 0; i < joints.size(); i += 8) {
+					if (joints[i + 4] != 0.0f || joints[i + 6] != 1.0f) {
+						return true;
+					}
+				}
+				return false;
+			}
+		};
 		RID parent; // canvas it belongs to
 		RID self;
 		List<Item *>::Element *E;
@@ -98,6 +133,7 @@ public:
 		SelfList<Item> update_item;
 		// Takes the place of the padding after the last field, so masks do not grow the item record.
 		MaskState *mask_state = nullptr;
+		DeformState *deform_state = nullptr;
 
 		Item() :
 				update_item(this) {
@@ -127,6 +163,9 @@ public:
 		~Item() {
 			if (mask_state) {
 				memdelete(mask_state);
+			}
+			if (deform_state) {
+				memdelete(deform_state);
 			}
 		}
 
@@ -236,6 +275,9 @@ public:
 		uint64_t placed_pass = 0;
 		uint64_t entry_pass = 0;
 		uint64_t used_pass = 0;
+		// Deform chain of the owner when it placed the mask in deform pass owner_deform_pass.
+		uint64_t owner_deform_pass = 0;
+		uint32_t owner_deform_chain = 0;
 		uint16_t entry = 0;
 	};
 	struct MaskSet {
@@ -278,6 +320,40 @@ public:
 	void _write_mask_rows(RendererCanvasRender::Item *p_list);
 	void _write_mask_entry(Mask *p_mask, const Size2 &p_page_size, int p_page_layers, int p_page_mipmaps, RendererCanvasRender::MaskRow *r_rows);
 
+	// Deforms: per canvas pass, record owners write records and items intern chains of up to four records. Nothing runs
+	// while no item has a deform state.
+	uint32_t deform_state_count = 0;
+	// Deform states whose record moves something: a canvas pass without any does no deform work.
+	uint32_t deform_moving_count = 0;
+	uint64_t deform_pass = 0;
+	bool deform_active = false;
+	bool deform_rows_published = false;
+	Transform2D deform_camera;
+	Transform2D deform_camera_inverse;
+	LocalVector<uint32_t> deform_chain_rows;
+	LocalVector<float> deform_record_rows;
+	HashMap<uint64_t, uint32_t> deform_chain_lookup;
+	// Chains with follow codes, keyed by the plain chain and the codes of all eight mask slots.
+	HashMap<uint64_t, uint32_t> deform_follow_lookup;
+	_FORCE_INLINE_ uint32_t _resolve_deform(Item *p_item, uint32_t p_inherited, const Transform2D &p_xform) {
+		const Item::DeformState *state = p_item->deform_state;
+		if (likely(!state || (!state->moving && (p_inherited == 0 || state->keeps_inherited())))) {
+			return p_inherited;
+		}
+		return _resolve_item_deform(p_item, p_inherited, p_xform);
+	}
+	void _update_deform_moving(Item::DeformState *p_state);
+	uint32_t _resolve_item_deform(Item *p_item, uint32_t p_inherited, const Transform2D &p_xform);
+	uint32_t _write_deform_record(const Item::DeformState *p_state, const Transform2D &p_xform);
+	uint32_t _intern_deform_chain(uint32_t p_base, uint32_t p_record);
+	Rect2 _grow_deformed_rect(uint32_t p_chain, const Rect2 &p_screen_rect) const;
+	uint32_t _deform_mask_follow(uint32_t p_chain, uint16_t p_mask_set, uint32_t &r_codes) const;
+	uint32_t _intern_deform_follow_chain(uint32_t p_chain, uint32_t p_codes);
+	void _begin_deform_pass(const Transform2D &p_transform);
+	void _publish_deform_rows(RendererCanvasRender::Item *p_list);
+	Item::DeformState *_get_deform_state(Item *p_item);
+	void _release_deform_state_if_empty(Item *p_item);
+
 	template <typename T>
 	void _free_rids(T &p_owner, const char *p_type);
 
@@ -297,9 +373,9 @@ public:
 
 private:
 	void _render_canvas_item_tree(RID p_to_render_target, Canvas::ChildItem *p_child_items, int p_child_item_count, const Transform2D &p_transform, const Rect2 &p_clip_rect, const Color &p_modulate, RendererCanvasRender::Light *p_lights, RendererCanvasRender::Light *p_directional_lights, RSE::CanvasItemTextureFilter p_default_filter, RSE::CanvasItemTextureRepeat p_default_repeat, bool p_snap_2d_vertices_to_pixel, uint32_t p_canvas_cull_mask, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
-	void _cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item, uint16_t p_mask_set = 0);
+	void _cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item, uint16_t p_mask_set = 0, uint32_t p_deform = 0);
 
-	void _collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask, uint16_t p_mask_set);
+	void _collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask, uint16_t p_mask_set, uint32_t p_deform, const Transform2D &p_root_xform);
 	int _count_ysort_children(RendererCanvasCull::Item *p_canvas_item);
 	void _mark_ysort_dirty(RendererCanvasCull::Item *ysort_owner);
 
@@ -335,6 +411,12 @@ public:
 	void canvas_item_remove_mask(RID p_item, RID p_mask);
 	void canvas_item_set_mask_excluded(RID p_item, RID p_mask, bool p_excluded);
 	void canvas_set_mask_page(RID p_texture);
+	void canvas_item_set_deform_joints(RID p_item, const Vector<float> &p_joints);
+	void canvas_item_set_deform_angles(RID p_item, const Vector<float> &p_angles);
+	void canvas_item_set_deform_stretch(RID p_item, const Vector<float> &p_stretch);
+	void canvas_item_set_deform_warp(RID p_item, int p_columns, int p_rows, const Rect2 &p_rect, const Vector<Vector2> &p_offsets, float p_strength);
+	void canvas_item_set_deform_flags(RID p_item, BitField<RSE::CanvasDeformFlags> p_flags);
+	void canvas_item_set_deform_excluded(RID p_item, bool p_excluded);
 	void canvas_item_initialize(RID p_rid);
 
 	void canvas_item_set_parent(RID p_item, RID p_parent);

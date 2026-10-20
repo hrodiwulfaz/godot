@@ -641,6 +641,62 @@
 				Sets the default texture repeat mode for the canvas item specified by the [param item] RID. Equivalent to [member CanvasItem.texture_repeat].
 			</description>
 		</method>
+		<method name="canvas_item_set_deform_angles">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="angles" type="PackedFloat32Array" />
+			<description>
+				Sets the turn of each joint of [param item] in radians, one value per joint set with [method canvas_item_set_deform_joints]. Meant for every frame: the item keeps the values in place, and in C# the overload that takes a span makes no managed allocation. Angles must be finite; a rejected call keeps the previous angles. Fork-only.
+			</description>
+		</method>
+		<method name="canvas_item_set_deform_excluded">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="excluded" type="bool" />
+			<description>
+				If [param excluded] is [code]true[/code], [param item] and its descendants drop the deform records they inherit; the item's own record still applies to them. Use it for parts that must not follow a parent's bend, such as arms under a hip bend on the torso. Fork-only.
+			</description>
+		</method>
+		<method name="canvas_item_set_deform_flags">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="flags" type="int" enum="RenderingServer.CanvasDeformFlags" is_bitfield="true" />
+			<description>
+				Sets how the bent rectangles of [param item] are drawn. Without flags of its own, an item uses the flags of the nearest item above it that owns a deform record. Fork-only.
+			</description>
+		</method>
+		<method name="canvas_item_set_deform_joints">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="joints" type="PackedFloat32Array" />
+			<description>
+				Sets the bend joints of [param item], six values per joint in the item's local space: pivot x, pivot y, axis x, axis y, blend and segment. At most 8 joints; an empty array removes them. Every value must be finite, the axis must not be zero and blend and segment must not be negative; the axis may have any other length and is made a unit vector. A rejected call keeps the previous joints. Setting joints resets their angles to 0 and stretch to 1 (see [method canvas_item_set_deform_angles] and [method canvas_item_set_deform_stretch]).
+				The axis points from the pivot toward the part that turns. A point turns around the pivot by the joint's angle times [code]smoothstep(-blend, blend, d)[/code], where [code]d[/code] is its distance past the pivot along the axis, so the fold spreads over twice the blend. Stretch scales the part past the pivot along the axis over [code]segment[/code] units, or to the end of the picture when [code]segment[/code] is 0. Joints apply from the last to the first, and weights use the straight position.
+				Forward+ and Mobile compile eligible materials' bent pipelines in the background after their plain pipelines. Compatibility compiles the bent canvas shader version at the first bend and saves it to the shader disk cache.
+				The joints and the warp grid of an item form its deform record. Records pass down to descendants, including Y-sorted ones, and stack with their own records: an item's own record applies first, then its parent's, up to four levels; a fifth level drops the outermost and warns once. See [method canvas_item_set_deform_excluded].
+				Only rectangle draws bend: sprites and texture page pictures. Nine-patches, lines, polygons, meshes, MSDF and LCD text are drawn straight. Joints with angle 0 and stretch 1 do nothing, and an item whose joints all rest and that has no warp is drawn as if it had no record, so a rig at rest costs nothing. A rectangle that no band of a turning joint, stretch piece or warp crosses is drawn as one quad moved as a whole. The others are drawn as grids with 16 long lines (32 with [constant CANVAS_DEFORM_FLAG_DENSE_GRID]) and 4 across. The long lines run along the picture's y and gather in the bands of the turning joints whose axes run along y, so a fold turns by equal steps; when the turning joints that cross the rectangle with axes along x turn more in total, the grid is turned and its long lines run along x. Lines gather in the bands of the first 4 joints of each record, at most 4 bands per rectangle; further joints still turn the picture, over evenly spread lines. A rectangle that a warp crosses is drawn as a grid of 24 columns and 32 rows that has a line on every grid line of the warp, so every warp point moves the picture. Short runs of up to 4 plain rectangles between grid rectangles join the grid draw. A mask follows the bend when every record that bends its owner also bends the item, as for a mask of the item itself or of an item above it whose records it inherits; it then follows only those records, not the item's own joints or the records between. Other masks stay in place. Normal maps turn with the bend. The visibility rectangle grows by the farthest place a joint can move the item's corners. With [method canvas_set_item_repeat] or [Parallax2D] repetition, deforms stay at the first copy. Fork-only.
+			</description>
+		</method>
+		<method name="canvas_item_set_deform_stretch">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="stretch" type="PackedFloat32Array" />
+			<description>
+				Sets the stretch of each joint of [param item], one finite value above 0 per joint; 1 leaves the part unchanged, 0.5 halves its length along the axis. A rejected call keeps the previous stretch. See [method canvas_item_set_deform_joints]. Fork-only.
+			</description>
+		</method>
+		<method name="canvas_item_set_deform_warp">
+			<return type="void" />
+			<param index="0" name="item" type="RID" />
+			<param index="1" name="columns" type="int" />
+			<param index="2" name="rows" type="int" />
+			<param index="3" name="rect" type="Rect2" />
+			<param index="4" name="offsets" type="PackedVector2Array" />
+			<param index="5" name="strength" type="float" />
+			<description>
+				Sets a free warp grid of [param item] in its local space: [param columns] by [param rows] points (2 to 16 each) spread over [param rect], each moved by its offset in [param offsets] (row by row) times [param strength]. Points between grid points move by the interpolated offset; points outside [param rect] do not move. If the item is turned against the warp's owner by an angle other than a multiple of 90 degrees, the picture's grid cannot follow the warp lines and only approximates the warp; a picture crossed by the warps of several records follows the lines of the innermost one. The warp applies before the joints of the same record. [param columns] 0 removes the warp. [param rect], its end, [param offsets] and [param strength] must be finite, and the rectangle must have a positive size; a rejected call keeps the previous warp. Tip-under order handles one fold direction per rectangle: with opposing folds in the same rectangle, one tip can overlap the stationary middle. Fork-only.
+			</description>
+		</method>
 		<method name="canvas_item_set_distance_field_mode">
 			<return type="void" />
 			<param index="0" name="item" type="RID" />
@@ -6250,6 +6306,12 @@
 		<constant name="CANVAS_ITEM_TEXTURE_REPEAT_MAX" value="4" enum="CanvasItemTextureRepeat">
 			Max value for [enum CanvasItemTextureRepeat] enum.
 		</constant>
+		<constant name="CANVAS_DEFORM_FLAG_TIP_UNDER" value="1" enum="CanvasDeformFlags" is_bitfield="true">
+			Grid rows are drawn from the tip back, so the part past a deep fold goes under the part before it. One fold direction is chosen per rectangle; with opposing folds in the same rectangle, one tip can overlap the stationary middle.
+		</constant>
+		<constant name="CANVAS_DEFORM_FLAG_DENSE_GRID" value="2" enum="CanvasDeformFlags" is_bitfield="true">
+			Bent rectangles are drawn with 32 grid rows instead of 16, for folds of more than about 120 degrees.
+		</constant>
 		<constant name="CANVAS_GROUP_MODE_DISABLED" value="0" enum="CanvasGroupMode">
 			Child draws over parent and is not clipped.
 		</constant>
@@ -6406,7 +6468,7 @@
 			Video memory used (in bytes). When using the Forward+ or Mobile renderers, this is always greater than the sum of [constant RENDERING_INFO_TEXTURE_MEM_USED] and [constant RENDERING_INFO_BUFFER_MEM_USED], since there is miscellaneous data not accounted for by those two metrics. When using the Compatibility renderer, this is equal to the sum of [constant RENDERING_INFO_TEXTURE_MEM_USED] and [constant RENDERING_INFO_BUFFER_MEM_USED].
 		</constant>
 		<constant name="RENDERING_INFO_PIPELINE_COMPILATIONS_CANVAS" value="6" enum="RenderingInfo">
-			Number of pipeline compilations that were triggered by the 2D canvas renderer.
+			Number of pipeline compilations that were triggered by the 2D canvas renderer. With the Compatibility renderer, counts canvas shader program compilations; programs loaded from the shader disk cache do not increase this count.
 		</constant>
 		<constant name="RENDERING_INFO_PIPELINE_COMPILATIONS_MESH" value="7" enum="RenderingInfo">
 			Number of pipeline compilations that were triggered by loading meshes. These compilations will show up as longer loading times the first time a user runs the game and the pipeline is required.
@@ -6425,6 +6487,9 @@
 		</constant>
 		<constant name="RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS" value="12" enum="RenderingInfo">
 			Number of canvas batches drawn with a general mask pipeline because the pipeline specialized for their mask state was still compiling or could not be built, since the start. Always [code]0[/code] with the Compatibility renderer.
+		</constant>
+		<constant name="RENDERING_INFO_SHADERS_COMPILING_CANVAS" value="13" enum="RenderingInfo">
+			Number of canvas shaders with outstanding background pipeline compilation records. A shader leaves this count only after all its tasks finish and their results are imported, or when the shader is freed. A value of 0 proves that no tracked canvas pipeline compilation remains outstanding. Always [code]0[/code] with the Compatibility renderer, which compiles shaders synchronously.
 		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.

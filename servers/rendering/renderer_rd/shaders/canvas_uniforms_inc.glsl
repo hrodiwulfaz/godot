@@ -52,6 +52,22 @@ struct InstanceData {
 
 #define BATCH_FLAGS_DEFAULT_NORMAL_MAP_USED (1 << 9)
 #define BATCH_FLAGS_DEFAULT_SPECULAR_MAP_USED (1 << 10)
+#define BATCH_FLAGS_DEFORM_GRID (1 << 11)
+#define BATCH_FLAGS_DEFORM_DENSE (1 << 12)
+#define BATCH_FLAGS_DEFORM_WARP (1 << 13)
+
+// Deform word of a rectangle (instance word at byte 100): chain and one bit per mask slot that follows the bend.
+#define DEFORM_CHAIN_MASK 0x3FFFFFu
+// Chain words: record row offset plus one, and in the high byte the follow codes of two mask slots.
+#define DEFORM_RECORD_MASK 0xFFFFFFu
+#define DEFORM_FOLLOW_CODE_SHIFT 24u
+// Joints per record, and bands per rectangle, that place grid lines.
+#define DEFORM_BAND_JOINTS 4u
+#define DEFORM_GRID_COLUMNS 4u
+#define DEFORM_GRID_ROWS 16u
+#define DEFORM_DENSE_GRID_ROWS 32u
+#define DEFORM_WARP_GRID_COLUMNS 24u
+#define DEFORM_WARP_GRID_ROWS 32u
 
 layout(push_constant, std430) uniform Params {
 	uint sc_packed_0;
@@ -103,6 +119,10 @@ uint sc_packed_0() {
 
 bool sc_mask_mipmaps() {
 	return ((sc_packed_0() >> 17) & 1U) != 0;
+}
+
+bool sc_use_deform() {
+	return ((sc_packed_0() >> 18) & 1U) != 0;
 }
 
 bool sc_mask_all_valid() {
@@ -178,6 +198,11 @@ layout(set = 0, binding = 8, std430) restrict readonly buffer MaskData {
 	uvec4 rows[];
 } mask_data;
 
+// Deform chains (record row offsets plus one, innermost first), then deform records from deform_record_base.
+layout(set = 0, binding = 30, std430) restrict readonly buffer DeformData {
+	vec4 rows[];
+} deform_data;
+
 layout(set = 0, binding = 1, std140) uniform CanvasData {
 	mat4 canvas_transform;
 	mat4 screen_transform;
@@ -196,7 +221,7 @@ layout(set = 0, binding = 1, std140) uniform CanvasData {
 	float shadow_pixel_size;
 	uint flags;
 	uint mask_entries_base;
-	uint mask_padding_0;
+	uint deform_record_base;
 	uint mask_padding_1;
 	uint mask_padding_2;
 }

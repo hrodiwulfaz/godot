@@ -1054,6 +1054,12 @@ public:
 	FUNC2(canvas_item_remove_mask, RID, RID)
 	FUNC3(canvas_item_set_mask_excluded, RID, RID, bool)
 	FUNC1(canvas_set_mask_page, RID)
+	FUNC2(canvas_item_set_deform_joints, RID, const Vector<float> &)
+	FUNC2(canvas_item_set_deform_angles, RID, const Vector<float> &)
+	FUNC2(canvas_item_set_deform_stretch, RID, const Vector<float> &)
+	FUNC6(canvas_item_set_deform_warp, RID, int, int, const Rect2 &, const Vector<Vector2> &, float)
+	FUNC2(canvas_item_set_deform_flags, RID, BitField<RSE::CanvasDeformFlags>)
+	FUNC2(canvas_item_set_deform_excluded, RID, bool)
 
 	FUNCRIDSPLIT(canvas_item)
 	FUNC2(canvas_item_set_parent, RID, RID)

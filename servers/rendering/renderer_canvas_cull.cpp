@@ -88,6 +88,7 @@ void RendererCanvasCull::_render_canvas_item_tree(RID p_to_render_target, Canvas
 	// function calls, as it won't be used in 99% of cases, because the camera
 	// transform is normally concatenated with the item global transform.
 	_current_camera_transform = p_transform;
+	_begin_deform_pass(p_transform);
 
 	memset(z_list, 0, z_range * sizeof(RendererCanvasRender::Item *));
 	memset(z_last_list, 0, z_range * sizeof(RendererCanvasRender::Item *));
@@ -114,6 +115,7 @@ void RendererCanvasCull::_render_canvas_item_tree(RID p_to_render_target, Canvas
 
 	RENDER_TIMESTAMP("Render CanvasItems");
 
+	_publish_deform_rows(list);
 	_write_mask_rows(list);
 	bool sdf_flag;
 	RSG::canvas_render->canvas_render_items(p_to_render_target, list, p_modulate, p_lights, p_directional_lights, p_transform, p_default_filter, p_default_repeat, p_snap_2d_vertices_to_pixel, sdf_flag, r_render_info);
@@ -122,7 +124,7 @@ void RendererCanvasCull::_render_canvas_item_tree(RID p_to_render_target, Canvas
 	}
 }
 
-void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask, uint16_t p_mask_set) {
+void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_canvas_item, RendererCanvasCull::Item *p_material_owner, const Color &p_modulate, RendererCanvasCull::Item **r_items, int &r_index, int &r_ysort_children_count, int p_z, uint32_t p_canvas_cull_mask, uint16_t p_mask_set, uint32_t p_deform, const Transform2D &p_root_xform) {
 	int child_item_count = p_canvas_item->child_items.size();
 	RendererCanvasCull::Item **child_items = p_canvas_item->child_items.ptrw();
 	for (int i = 0; i < child_item_count; i++) {
@@ -147,6 +149,8 @@ void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_can
 				child_items[i]->material_owner = child_items[i]->use_parent_material ? p_material_owner : nullptr;
 				child_items[i]->ysort_modulate = p_modulate;
 				child_items[i]->ysort_mask_set = p_mask_set;
+				// Holds the inherited deform until the item is culled and resolves its own.
+				child_items[i]->deform = p_deform;
 				child_items[i]->ysort_index = r_index;
 				child_items[i]->ysort_parent_abs_z_index = p_z;
 
@@ -167,7 +171,7 @@ void RendererCanvasCull::_collect_ysort_children(RendererCanvasCull::Item *p_can
 				r_index++;
 
 				if (child_items[i]->sort_y) {
-					_collect_ysort_children(child_items[i], child_items[i]->use_parent_material ? p_material_owner : child_items[i], p_modulate * child_items[i]->modulate, r_items, r_index, r_ysort_children_count, abs_z, p_canvas_cull_mask, _resolve_mask_set(child_items[i], p_mask_set));
+					_collect_ysort_children(child_items[i], child_items[i]->use_parent_material ? p_material_owner : child_items[i], p_modulate * child_items[i]->modulate, r_items, r_index, r_ysort_children_count, abs_z, p_canvas_cull_mask, _resolve_mask_set(child_items[i], p_mask_set), _resolve_deform(child_items[i], p_deform, p_root_xform * child_items[i]->ysort_xform) & RendererCanvasRender::DEFORM_INHERITED_MASK, p_root_xform);
 				}
 			} else {
 				r_ysort_children_count--;
@@ -316,7 +320,7 @@ void RendererCanvasCull::_attach_canvas_item_for_draw(RendererCanvasCull::Item *
 	}
 }
 
-void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item, uint16_t p_mask_set) {
+void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2D &p_parent_xform, const Rect2 &p_clip_rect, const Color &p_modulate, int p_z, RendererCanvasRender::Item **r_z_list, RendererCanvasRender::Item **r_z_last_list, Item *p_canvas_clip, Item *p_material_owner, bool p_is_already_y_sorted, uint32_t p_canvas_cull_mask, const Point2 &p_repeat_size, int p_repeat_times, RendererCanvasRender::Item *p_repeat_source_item, uint16_t p_mask_set, uint32_t p_deform) {
 	Item *ci = p_canvas_item;
 
 	if (!ci->visible) {
@@ -381,6 +385,9 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 		final_xform = parent_xform * self_xform;
 	}
 
+	ci->deform = _resolve_deform(ci, p_deform, final_xform);
+	const uint32_t deform = ci->deform & RendererCanvasRender::DEFORM_INHERITED_MASK;
+
 	if (unlikely(ci->mask_state)) {
 		ci->mask_set = _resolve_mask_set(ci, p_mask_set);
 		_place_owned_masks(ci, final_xform);
@@ -428,6 +435,9 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 		corner_rect.position -= size_x_offset;
 		global_rect = global_rect.merge(corner_rect);
 	}
+	if (unlikely(deform & RendererCanvasRender::DEFORM_CHAIN_MASK)) {
+		global_rect = _grow_deformed_rect(deform & RendererCanvasRender::DEFORM_CHAIN_MASK, global_rect);
+	}
 	global_rect.position += p_clip_rect.position;
 
 	int child_item_count = ci->child_items.size();
@@ -474,13 +484,15 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 			ci->ysort_parent_abs_z_index = parent_z;
 			child_items[0] = ci;
 			int i = 1;
-			_collect_ysort_children(ci, p_material_owner, Color(1, 1, 1, 1), child_items, i, child_item_count, p_z, p_canvas_cull_mask, ci->mask_set);
+			_collect_ysort_children(ci, p_material_owner, Color(1, 1, 1, 1), child_items, i, child_item_count, p_z, p_canvas_cull_mask, ci->mask_set, deform, final_xform);
 
 			SortArray<Item *, ItemYSort> sorter;
 			sorter.sort(child_items, child_item_count);
 
 			for (i = 0; i < child_item_count; i++) {
-				_cull_canvas_item(child_items[i], final_xform * child_items[i]->ysort_xform, p_clip_rect, modulate * child_items[i]->ysort_modulate, child_items[i]->ysort_parent_abs_z_index, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, (Item *)child_items[i]->material_owner, true, p_canvas_cull_mask, child_items[i]->repeat_size, child_items[i]->repeat_times, child_items[i]->repeat_source_item, child_items[i]->ysort_mask_set);
+				// The root resolved its deform from p_deform; its children hold their inherited deform until culled.
+				const uint32_t inherited_deform = child_items[i] == ci ? p_deform : child_items[i]->deform;
+				_cull_canvas_item(child_items[i], final_xform * child_items[i]->ysort_xform, p_clip_rect, modulate * child_items[i]->ysort_modulate, child_items[i]->ysort_parent_abs_z_index, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, (Item *)child_items[i]->material_owner, true, p_canvas_cull_mask, child_items[i]->repeat_size, child_items[i]->repeat_times, child_items[i]->repeat_source_item, child_items[i]->ysort_mask_set, inherited_deform);
 			}
 		} else {
 			RendererCanvasRender::Item *canvas_group_from = nullptr;
@@ -504,14 +516,14 @@ void RendererCanvasCull::_cull_canvas_item(Item *p_canvas_item, const Transform2
 			if (!child_items[i]->behind && !use_canvas_group) {
 				continue;
 			}
-			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item, ci->mask_set);
+			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item, ci->mask_set, deform);
 		}
 		_attach_canvas_item_for_draw(ci, p_canvas_clip, r_z_list, r_z_last_list, final_xform, p_clip_rect, global_rect, modulate, p_z, p_material_owner, use_canvas_group, canvas_group_from);
 		for (int i = 0; i < child_item_count; i++) {
 			if (child_items[i]->behind || use_canvas_group) {
 				continue;
 			}
-			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item, ci->mask_set);
+			_cull_canvas_item(child_items[i], final_xform, p_clip_rect, modulate, p_z, r_z_list, r_z_last_list, (Item *)ci->final_clip_owner, p_material_owner, false, p_canvas_cull_mask, repeat_size, repeat_times, repeat_source_item, ci->mask_set, deform);
 		}
 	}
 }
@@ -2793,6 +2805,13 @@ bool RendererCanvasCull::free(RID p_rid) {
 			canvas_item->canvas_group = nullptr;
 		}
 
+		if (canvas_item->deform_state) {
+			deform_state_count--;
+			if (canvas_item->deform_state->moving) {
+				deform_moving_count--;
+			}
+		}
+
 		canvas_item_owner.free(p_rid);
 
 	} else if (canvas_light_owner.owns(p_rid)) {
@@ -3060,6 +3079,404 @@ void RendererCanvasCull::canvas_set_mask_page(RID p_texture) {
 	mask_page = p_texture;
 }
 
+RendererCanvasCull::Item::DeformState *RendererCanvasCull::_get_deform_state(Item *p_item) {
+	if (!p_item->deform_state) {
+		p_item->deform_state = memnew(Item::DeformState);
+		deform_state_count++;
+	}
+	p_item->deform_state->pass = 0;
+	return p_item->deform_state;
+}
+
+void RendererCanvasCull::_release_deform_state_if_empty(Item *p_item) {
+	if (p_item->deform_state && p_item->deform_state->is_empty()) {
+		memdelete(p_item->deform_state);
+		p_item->deform_state = nullptr;
+		deform_state_count--;
+	}
+}
+
+void RendererCanvasCull::_update_deform_moving(Item::DeformState *p_state) {
+	const bool moving = p_state->moves();
+	if (moving != p_state->moving) {
+		p_state->moving = moving;
+		if (moving) {
+			deform_moving_count++;
+		} else {
+			deform_moving_count--;
+		}
+	}
+}
+
+// Unit vector of a finite joint axis. Dividing by the largest component first keeps huge axes from overflowing and
+// tiny ones from vanishing when squared.
+static Vector2 deform_unit_axis(float p_x, float p_y) {
+	const float largest = MAX(Math::abs(p_x), Math::abs(p_y));
+	if (largest == 0.0f) {
+		return Vector2();
+	}
+	return Vector2(p_x / largest, p_y / largest).normalized();
+}
+
+void RendererCanvasCull::canvas_item_set_deform_joints(RID p_item, const Vector<float> &p_joints) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	ERR_FAIL_COND_MSG(p_joints.size() % 6 != 0, "Deform joints take six values each: pivot x, pivot y, axis x, axis y, blend and segment.");
+	const int joints = p_joints.size() / 6;
+	ERR_FAIL_COND_MSG(joints > int(RendererCanvasRender::DEFORM_MAX_JOINTS), vformat("A canvas item takes at most %d deform joints.", RendererCanvasRender::DEFORM_MAX_JOINTS));
+	for (int joint = 0; joint < joints; joint++) {
+		const float *values = p_joints.ptr() + joint * 6;
+		for (int value = 0; value < 6; value++) {
+			ERR_FAIL_COND_MSG(!Math::is_finite(values[value]), "Deform joint values must be finite.");
+		}
+		ERR_FAIL_COND_MSG(values[2] == 0.0f && values[3] == 0.0f, "A deform joint axis must not be zero.");
+		ERR_FAIL_COND_MSG(!deform_unit_axis(values[2], values[3]).is_normalized(), "A deform joint axis has no direction that can be normalized.");
+		ERR_FAIL_COND_MSG(values[4] < 0.0f || values[5] < 0.0f, "Deform joint blend and segment must not be negative.");
+	}
+	if (joints == 0 && !canvas_item->deform_state) {
+		return;
+	}
+	Item::DeformState *state = _get_deform_state(canvas_item);
+	state->joints.resize(joints * 8);
+	for (int joint = 0; joint < joints; joint++) {
+		const float *values = p_joints.ptr() + joint * 6;
+		float *record = state->joints.ptr() + joint * 8;
+		const Vector2 axis = deform_unit_axis(values[2], values[3]);
+		record[0] = values[0];
+		record[1] = values[1];
+		record[2] = axis.x;
+		record[3] = axis.y;
+		record[4] = 0.0f;
+		record[5] = values[4];
+		record[6] = 1.0f;
+		record[7] = values[5];
+	}
+	_update_deform_moving(state);
+	_release_deform_state_if_empty(canvas_item);
+}
+
+void RendererCanvasCull::canvas_item_set_deform_angles(RID p_item, const Vector<float> &p_angles) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	Item::DeformState *state = canvas_item->deform_state;
+	ERR_FAIL_COND_MSG(!state || state->joints.is_empty(), "Set the deform joints before their angles.");
+	ERR_FAIL_COND_MSG(uint32_t(p_angles.size()) * 8 != state->joints.size(), "Deform angles take one value per joint.");
+	for (int joint = 0; joint < p_angles.size(); joint++) {
+		ERR_FAIL_COND_MSG(!Math::is_finite(p_angles[joint]), "Deform angles must be finite.");
+	}
+	float *record = state->joints.ptr();
+	for (int joint = 0; joint < p_angles.size(); joint++) {
+		record[joint * 8 + 4] = p_angles[joint];
+	}
+	_update_deform_moving(state);
+	state->pass = 0;
+}
+
+void RendererCanvasCull::canvas_item_set_deform_stretch(RID p_item, const Vector<float> &p_stretch) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	Item::DeformState *state = canvas_item->deform_state;
+	ERR_FAIL_COND_MSG(!state || state->joints.is_empty(), "Set the deform joints before their stretch.");
+	ERR_FAIL_COND_MSG(uint32_t(p_stretch.size()) * 8 != state->joints.size(), "Deform stretch takes one value per joint.");
+	for (int joint = 0; joint < p_stretch.size(); joint++) {
+		ERR_FAIL_COND_MSG(!(p_stretch[joint] > 0.0f) || !Math::is_finite(p_stretch[joint]), "Deform stretch must be finite and above zero.");
+	}
+	float *record = state->joints.ptr();
+	for (int joint = 0; joint < p_stretch.size(); joint++) {
+		record[joint * 8 + 6] = p_stretch[joint];
+	}
+	_update_deform_moving(state);
+	state->pass = 0;
+}
+
+void RendererCanvasCull::canvas_item_set_deform_warp(RID p_item, int p_columns, int p_rows, const Rect2 &p_rect, const Vector<Vector2> &p_offsets, float p_strength) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	if (p_columns == 0) {
+		if (canvas_item->deform_state) {
+			Item::DeformState *state = _get_deform_state(canvas_item);
+			state->warp_columns = 0;
+			state->warp_rows = 0;
+			state->warp_offsets.clear();
+			_update_deform_moving(state);
+			_release_deform_state_if_empty(canvas_item);
+		}
+		return;
+	}
+	const int max_size = int(RendererCanvasRender::DEFORM_MAX_WARP_SIZE);
+	ERR_FAIL_COND_MSG(p_columns < 2 || p_rows < 2 || p_columns > max_size || p_rows > max_size, vformat("A deform warp grid has 2 to %d columns and rows.", max_size));
+	ERR_FAIL_COND_MSG(p_offsets.size() != p_columns * p_rows, "A deform warp grid takes one offset per point.");
+	ERR_FAIL_COND_MSG(!p_rect.is_finite() || !p_rect.get_end().is_finite() || p_rect.size.x <= 0 || p_rect.size.y <= 0, "A deform warp rectangle and its end must be finite and have a positive size.");
+	ERR_FAIL_COND_MSG(!Math::is_finite(p_strength), "A deform warp strength must be finite.");
+	for (const Vector2 &offset : p_offsets) {
+		ERR_FAIL_COND_MSG(!offset.is_finite(), "Deform warp offsets must be finite.");
+	}
+	Item::DeformState *state = _get_deform_state(canvas_item);
+	state->warp_columns = p_columns;
+	state->warp_rows = p_rows;
+	state->warp_rect = p_rect;
+	state->warp_strength = p_strength;
+	state->warp_offsets.resize(p_offsets.size());
+	memcpy(state->warp_offsets.ptr(), p_offsets.ptr(), p_offsets.size() * sizeof(Vector2));
+	_update_deform_moving(state);
+}
+
+void RendererCanvasCull::canvas_item_set_deform_flags(RID p_item, BitField<RSE::CanvasDeformFlags> p_flags) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	const uint32_t flags = uint32_t(int64_t(p_flags)) & (RSE::CANVAS_DEFORM_FLAG_TIP_UNDER | RSE::CANVAS_DEFORM_FLAG_DENSE_GRID);
+	if (flags == 0 && !canvas_item->deform_state) {
+		return;
+	}
+	_get_deform_state(canvas_item)->flags = flags;
+	_release_deform_state_if_empty(canvas_item);
+}
+
+void RendererCanvasCull::canvas_item_set_deform_excluded(RID p_item, bool p_excluded) {
+	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
+	ERR_FAIL_NULL(canvas_item);
+	if (!p_excluded && !canvas_item->deform_state) {
+		return;
+	}
+	_get_deform_state(canvas_item)->excluded = p_excluded;
+	_release_deform_state_if_empty(canvas_item);
+}
+
+void RendererCanvasCull::_begin_deform_pass(const Transform2D &p_transform) {
+	deform_active = deform_moving_count > 0;
+	if (!deform_active) {
+		// The rows of the last pass that moved something are dropped once.
+		if (!deform_record_rows.is_empty()) {
+			deform_record_rows.clear();
+			deform_chain_rows.clear();
+			deform_chain_lookup.clear();
+			deform_follow_lookup.clear();
+		}
+		return;
+	}
+	deform_pass++;
+	deform_camera = p_transform;
+	deform_camera_inverse = p_transform.affine_inverse();
+	deform_chain_rows.resize(4);
+	deform_chain_rows[0] = deform_chain_rows[1] = deform_chain_rows[2] = deform_chain_rows[3] = 0;
+	deform_record_rows.clear();
+	deform_chain_lookup.clear();
+	deform_follow_lookup.clear();
+}
+
+uint32_t RendererCanvasCull::_resolve_item_deform(Item *p_item, uint32_t p_inherited, const Transform2D &p_xform) {
+	Item::DeformState *state = p_item->deform_state;
+	if (state->pass == deform_pass && state->inherited == p_inherited) {
+		return state->resolved;
+	}
+	const uint32_t inherited = state->excluded ? 0 : p_inherited;
+	uint32_t chain = inherited & RendererCanvasRender::DEFORM_CHAIN_MASK;
+	uint32_t flags = inherited & ~RendererCanvasRender::DEFORM_CHAIN_MASK;
+	if (state->moving) {
+		if (state->pass != deform_pass) {
+			state->record = _write_deform_record(state, p_xform) + 1;
+		}
+		chain = _intern_deform_chain(chain, state->record);
+		flags = state->flags << RendererCanvasRender::DEFORM_FLAGS_SHIFT;
+	} else if (state->flags != 0) {
+		flags = state->flags << RendererCanvasRender::DEFORM_FLAGS_SHIFT;
+	}
+	state->pass = deform_pass;
+	state->inherited = p_inherited;
+	state->resolved = chain == 0 ? 0 : (chain | flags);
+	return state->resolved;
+}
+
+uint32_t RendererCanvasCull::_write_deform_record(const Item::DeformState *p_state, const Transform2D &p_xform) {
+	const uint32_t joints = p_state->joints.size() / 8;
+	const uint32_t points = p_state->warp_columns * p_state->warp_rows;
+	const Transform2D world = deform_camera_inverse * p_xform;
+	const uint32_t record = deform_record_rows.size() / 4;
+	const uint32_t row_count = 4 + joints * 2 + (points + 1) / 2;
+	deform_record_rows.resize(deform_record_rows.size() + row_count * 4);
+	float *out = deform_record_rows.ptr() + record * 4;
+	memset(out, 0, row_count * 4 * sizeof(float));
+	out[0] = world.columns[0].x;
+	out[1] = world.columns[0].y;
+	out[2] = world.columns[1].x;
+	out[3] = world.columns[1].y;
+	out[4] = world.columns[2].x;
+	out[5] = world.columns[2].y;
+	out[6] = float(joints);
+	out[7] = float(p_state->warp_columns);
+	out[8] = float(p_state->warp_rows);
+	out[9] = p_state->warp_strength;
+	out[12] = p_state->warp_rect.position.x;
+	out[13] = p_state->warp_rect.position.y;
+	out[14] = p_state->warp_rect.size.x;
+	out[15] = p_state->warp_rect.size.y;
+	memcpy(out + 16, p_state->joints.ptr(), joints * 8 * sizeof(float));
+	if (points > 0) {
+		memcpy(out + 16 + joints * 8, p_state->warp_offsets.ptr(), points * 2 * sizeof(float));
+	}
+	return record;
+}
+
+uint32_t RendererCanvasCull::_intern_deform_chain(uint32_t p_base, uint32_t p_record) {
+	const uint64_t key = (uint64_t(p_base) << 32) | uint64_t(p_record);
+	if (const uint32_t *found = deform_chain_lookup.getptr(key)) {
+		return *found;
+	}
+	const uint32_t chain = deform_chain_rows.size() / 4;
+	if (chain > RendererCanvasRender::DEFORM_CHAIN_MASK || p_record > RendererCanvasRender::DEFORM_RECORD_MASK) {
+		WARN_PRINT_ONCE("Too many canvas deform chains or records in one canvas pass; the rest draw without their own deform.");
+		return p_base;
+	}
+	const uint32_t *base_row = deform_chain_rows.ptr() + p_base * 4;
+	const uint32_t row[4] = { p_record, base_row[0], base_row[1], base_row[2] };
+	if (base_row[3] != 0) {
+		WARN_PRINT_ONCE("A canvas item has more than four nested deforms; the outermost is ignored.");
+	}
+	for (uint32_t i = 0; i < 4; i++) {
+		deform_chain_rows.push_back(row[i]);
+	}
+	deform_chain_lookup.insert(key, chain);
+	return chain;
+}
+
+// Grows a screen-space rectangle by the farthest place the chain can move its points: a joint turns the points
+// beyond it around its pivot, so they stay within the circle through the farthest corner; stretch and warp move them
+// by at most their offsets.
+Rect2 RendererCanvasCull::_grow_deformed_rect(uint32_t p_chain, const Rect2 &p_screen_rect) const {
+	const uint32_t *records = deform_chain_rows.ptr() + p_chain * 4;
+	Rect2 rect = deform_camera_inverse.xform(p_screen_rect);
+	for (uint32_t level = 0; level < RendererCanvasRender::DEFORM_MAX_LEVELS && records[level] != 0; level++) {
+		const float *record = deform_record_rows.ptr() + (records[level] - 1) * 4;
+		const Transform2D owner(Vector2(record[0], record[1]), Vector2(record[2], record[3]), Vector2(record[4], record[5]));
+		Rect2 local = owner.affine_inverse().xform(rect);
+		const uint32_t joints = uint32_t(record[6]);
+		const uint32_t points = uint32_t(record[7]) * uint32_t(record[8]);
+		if (points > 0) {
+			float reach = 0.0f;
+			const float *offsets = record + 16 + joints * 8;
+			for (uint32_t i = 0; i < points; i++) {
+				reach = MAX(reach, Vector2(offsets[i * 2], offsets[i * 2 + 1]).length());
+			}
+			local = local.grow(reach * Math::abs(record[9]));
+		}
+		for (int joint = int(joints) - 1; joint >= 0; joint--) {
+			const float *a = record + 16 + joint * 8;
+			const float *b = a + 4;
+			const Vector2 pivot(a[0], a[1]);
+			const Vector2 axis(a[2], a[3]);
+			if (b[2] != 1.0f) {
+				const Vector2 corners[4] = { local.position, Vector2(local.get_end().x, local.position.y), local.get_end(), Vector2(local.position.x, local.get_end().y) };
+				float farthest = 0.0f;
+				for (const Vector2 &corner : corners) {
+					farthest = MAX(farthest, axis.dot(corner - pivot));
+				}
+				const float extent = b[3] > 0.0f ? MIN(b[3], farthest) : farthest;
+				local = local.merge(Rect2(local.position + axis * (extent * (b[2] - 1.0f)), local.size));
+			}
+			if (b[0] != 0.0f) {
+				const Vector2 corners[4] = { local.position, Vector2(local.get_end().x, local.position.y), local.get_end(), Vector2(local.position.x, local.get_end().y) };
+				float radius = 0.0f;
+				for (const Vector2 &corner : corners) {
+					radius = MAX(radius, corner.distance_to(pivot));
+				}
+				local = local.merge(Rect2(pivot - Vector2(radius, radius), Vector2(radius, radius) * 2.0f));
+			}
+		}
+		rect = owner.xform(local);
+	}
+	return deform_camera.xform(rect);
+}
+
+// One bit per mask slot of the set: the mask follows the bend when its owner was placed this pass with a chain that
+// ends the item's chain (the owner is the item, or an item whose records bend it). It follows only the owner's records:
+// r_codes gets, per slot, 1 plus the number of the item's inner records that come before the owner's chain.
+uint32_t RendererCanvasCull::_deform_mask_follow(uint32_t p_chain, uint16_t p_mask_set, uint32_t &r_codes) const {
+	const uint32_t *chain = deform_chain_rows.ptr() + p_chain * 4;
+	uint32_t length = 0;
+	while (length < RendererCanvasRender::DEFORM_MAX_LEVELS && chain[length] != 0) {
+		length++;
+	}
+	uint32_t follow = 0;
+	r_codes = 0;
+	const MaskSet &set = mask_sets[p_mask_set];
+	for (uint32_t slot = 0; slot < 8 && set.entries[slot] != 0; slot++) {
+		const Mask *mask = mask_entries[set.entries[slot] - 1];
+		if (!mask || mask->owner_deform_pass != deform_pass || mask->owner_deform_chain == 0) {
+			continue;
+		}
+		const uint32_t *owner = deform_chain_rows.ptr() + mask->owner_deform_chain * 4;
+		uint32_t owner_length = 0;
+		while (owner_length < RendererCanvasRender::DEFORM_MAX_LEVELS && owner[owner_length] != 0) {
+			owner_length++;
+		}
+		if (owner_length > length) {
+			continue;
+		}
+		bool suffix = true;
+		for (uint32_t i = 0; i < owner_length && suffix; i++) {
+			suffix = chain[length - owner_length + i] == owner[i];
+		}
+		if (suffix) {
+			follow |= 1u << slot;
+			r_codes |= (1 + length - owner_length) << (slot * RendererCanvasRender::DEFORM_FOLLOW_CODE_BITS);
+		}
+	}
+	return follow;
+}
+
+// A copy of a chain whose words also hold the follow codes (see RendererCanvasRender::DEFORM_RECORD_MASK).
+uint32_t RendererCanvasCull::_intern_deform_follow_chain(uint32_t p_chain, uint32_t p_codes) {
+	const uint64_t key = (uint64_t(p_codes) << 32) | uint64_t(p_chain);
+	if (const uint32_t *found = deform_follow_lookup.getptr(key)) {
+		return *found;
+	}
+	const uint32_t chain = deform_chain_rows.size() / 4;
+	if (chain > RendererCanvasRender::DEFORM_CHAIN_MASK) {
+		WARN_PRINT_ONCE("Too many canvas deform chains in one canvas pass; masks of the rest do not follow the bend.");
+		return p_chain;
+	}
+	const uint32_t code_bits = 2 * RendererCanvasRender::DEFORM_FOLLOW_CODE_BITS;
+	for (uint32_t word = 0; word < 4; word++) {
+		const uint32_t codes = (p_codes >> (word * code_bits)) & ((1u << code_bits) - 1);
+		deform_chain_rows.push_back(deform_chain_rows[p_chain * 4 + word] | (codes << RendererCanvasRender::DEFORM_FOLLOW_CODE_SHIFT));
+	}
+	deform_follow_lookup.insert(key, chain);
+	return chain;
+}
+
+void RendererCanvasCull::_publish_deform_rows(RendererCanvasRender::Item *p_list) {
+	RendererCanvasRender::DeformData &data = RSG::canvas_render->deform_data;
+	if (!deform_active || deform_record_rows.is_empty()) {
+		if (deform_rows_published) {
+			data.rows.clear();
+			data.record_base = 0;
+			deform_rows_published = false;
+		}
+		return;
+	}
+	if (!mask_entries.is_empty()) {
+		for (RendererCanvasRender::Item *item = p_list; item; item = item->next) {
+			uint32_t chain = item->deform & RendererCanvasRender::DEFORM_CHAIN_MASK;
+			if (chain == 0 || item->mask_set < 2) {
+				continue;
+			}
+			uint32_t codes = 0;
+			const uint32_t follow = _deform_mask_follow(chain, item->mask_set, codes);
+			if (follow != 0) {
+				chain = _intern_deform_follow_chain(chain, codes);
+			}
+			const uint32_t flags = item->deform & RendererCanvasRender::DEFORM_INHERITED_MASK & ~RendererCanvasRender::DEFORM_CHAIN_MASK;
+			item->deform = chain | flags | (follow << RendererCanvasRender::DEFORM_MASK_FOLLOW_SHIFT);
+		}
+	}
+	const uint32_t chain_rows = deform_chain_rows.size() / 4;
+	data.record_base = chain_rows;
+	data.rows.resize(deform_chain_rows.size() + deform_record_rows.size());
+	memcpy(data.rows.ptr(), deform_chain_rows.ptr(), deform_chain_rows.size() * sizeof(uint32_t));
+	memcpy(data.rows.ptr() + deform_chain_rows.size(), deform_record_rows.ptr(), deform_record_rows.size() * sizeof(float));
+	deform_rows_published = true;
+}
+
 uint16_t RendererCanvasCull::_resolve_item_mask_set(Item *p_item, uint16_t p_inherited) {
 	Item::MaskState *mask_state = p_item->mask_state;
 	if (mask_state->masks.is_empty() && mask_state->excluded_masks.is_empty()) {
@@ -3084,6 +3501,8 @@ void RendererCanvasCull::_place_owned_masks(Item *p_item, const Transform2D &p_t
 		}
 		mask->screen_transform = mask_owner_transform * mask->unit_to_owner;
 		mask->placed_pass = mask_pass;
+		mask->owner_deform_pass = deform_pass;
+		mask->owner_deform_chain = p_item->deform & RendererCanvasRender::DEFORM_CHAIN_MASK;
 	}
 }
 

@@ -363,7 +363,9 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 		glGenTextures(1, &state.mask_rows_texture);
 	}
 	glBindTexture(GL_TEXTURE_2D, state.mask_rows_texture);
-	const uint32_t required_rows = MAX(1024u, uint32_t(mask_data.rows.size()));
+	state.deform_texel_base = ((uint32_t(mask_data.rows.size()) + 1023u) / 1024u) * 1024u;
+	const uint32_t deform_texels = deform_data.rows.size() / 4;
+	const uint32_t required_rows = MAX(1024u, MAX(uint32_t(mask_data.rows.size()), state.deform_texel_base + deform_texels));
 	const bool new_mask_texture = state.mask_rows_capacity < required_rows;
 	if (new_mask_texture) {
 		state.mask_rows_capacity = MAX(1024u, state.mask_rows_capacity);
@@ -401,9 +403,21 @@ void RasterizerCanvasGLES3::canvas_render_items(RID p_to_render_target, Item *p_
 		}
 	}
 
+		if (deform_texels > 0) {
+			for (uint32_t first = 0; first < deform_texels;) {
+				const uint32_t texel = state.deform_texel_base + first;
+				const uint32_t count = MIN(deform_texels - first, 1024 - texel % 1024);
+				glTexSubImage2D(GL_TEXTURE_2D, 0, texel % 1024, texel / 1024, count, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, deform_data.rows.ptr() + first * 4);
+				first += count;
+			}
+			// Chain 0 is never read, so its texel holds the record base.
+			const uint32_t header[4] = { deform_data.record_base, 0, 0, 0 };
+			glTexSubImage2D(GL_TEXTURE_2D, 0, state.deform_texel_base % 1024, state.deform_texel_base / 1024, 1, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, header);
+		}
+
 		StateBuffer state_buffer;
 		state_buffer.mask_entries_base = mask_data.entries_base;
-		state_buffer.pad2 = 0;
+		state_buffer.deform_texel_base = state.deform_texel_base;
 
 		Size2i ssize = texture_storage->render_target_get_size(p_to_render_target);
 
@@ -817,6 +831,8 @@ void RasterizerCanvasGLES3::_render_items(RID p_to_render_target, int p_item_cou
 			material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::MASK_MIPMAPS, state.mask_mipmaps, shader_version, variant, specialization);
 		}
 		material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::BATCH_FLAGS, state.canvas_instance_batches[i].flags, shader_version, variant, specialization);
+		state.batch_shader_version = shader_version;
+		state.batch_specialization = specialization;
 		material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::SPECULAR_SHININESS_IN, state.canvas_instance_batches[i].specular_shininess, shader_version, variant, specialization);
 		material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::REGION_MIPMAP_BIAS, region_mipmap_bias, shader_version, variant, specialization);
 
@@ -901,6 +917,7 @@ void RasterizerCanvasGLES3::_render_items(RID p_to_render_target, int p_item_cou
 	glDisable(GL_SCISSOR_TEST);
 	state.current_batch_index = 0;
 	state.canvas_instance_batches.clear();
+	state.grid_runs.clear();
 	state.last_item_index += index;
 }
 
@@ -1150,12 +1167,13 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 					state.instance_data_array[r_index].sampler_domain[2] = sampler_domain.size.x;
 					state.instance_data_array[r_index].sampler_domain[3] = sampler_domain.size.y;
 					state.instance_data_array[r_index].item_data |= rect->array_layer | (rect->max_region_lod << 11);
-					state.instance_data_array[r_index].reserved = 0;
 					state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
 					if (array_requested) {
 						state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_USE_ARRAY_LAYER;
 					}
 				}
+				state.instance_data_array[r_index].reserved = 0;
+				_record_deform(r_index, p_item->deform, base_transform, draw_transform, dst_rect);
 
 				_add_to_batch(r_index, r_batch_broken);
 			} break;
@@ -1246,6 +1264,8 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 				state.instance_data_array[r_index].dst_rect[1] = dst_rect.position.y;
 				state.instance_data_array[r_index].dst_rect[2] = dst_rect.size.width;
 				state.instance_data_array[r_index].dst_rect[3] = dst_rect.size.height;
+				state.instance_data_array[r_index].reserved = 0;
+				_record_deform(r_index, (rect->flags & (CANVAS_RECT_MSDF | CANVAS_RECT_LCD)) ? 0 : p_item->deform, base_transform, draw_transform, dst_rect);
 
 				_add_to_batch(r_index, r_batch_broken);
 			} break;
@@ -1536,20 +1556,62 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 		case Item::Command::TYPE_RECT:
 		case Item::Command::TYPE_TEXTURE_PAGE_RECT:
 		case Item::Command::TYPE_NINEPATCH: {
-			glBindVertexArray(data.indexed_quad_array);
-			glBindBuffer(GL_ARRAY_BUFFER, state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[state.canvas_instance_batches[p_index].instance_buffer_index]);
-			uint32_t range_start = state.canvas_instance_batches[p_index].start * sizeof(InstanceData);
-			_enable_attributes(range_start, false);
+			const Batch &batch = state.canvas_instance_batches[p_index];
+			const GLuint instance_buffer = state.canvas_instance_data_buffers[state.current_data_buffer_index].instance_buffers[batch.instance_buffer_index];
+			if (!batch.use_grid) {
+				glBindVertexArray(data.indexed_quad_array);
+				glBindBuffer(GL_ARRAY_BUFFER, instance_buffer);
+				uint32_t range_start = batch.start * sizeof(InstanceData);
+				_enable_attributes(range_start, false);
 
-			glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, state.canvas_instance_batches[p_index].instance_count);
-			glBindVertexArray(0);
+				glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, batch.instance_count);
+				glBindVertexArray(0);
 
-			if (r_render_info) {
-				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += state.canvas_instance_batches[p_index].instance_count;
-				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += 2 * state.canvas_instance_batches[p_index].instance_count;
-				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+				if (r_render_info) {
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += batch.instance_count;
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += 2 * batch.instance_count;
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+				}
+				break;
 			}
 
+			// Each run of plain or grid rectangles is its own draw; a short plain run between grid runs of one kind is
+			// drawn with the grid. A run of another grid kind in between keeps its own grid.
+			GLES3::MaterialStorage *material_storage = GLES3::MaterialStorage::get_singleton();
+			const uint32_t *runs = state.grid_runs.ptr() + batch.grid_runs_start;
+			for (uint32_t run = 0; run < batch.grid_runs_count; run++) {
+				const uint32_t first = runs[run] >> DEFORM_GRID_RUN_KIND_BITS;
+				const uint32_t kind = runs[run] & DEFORM_GRID_RUN_KIND_MASK;
+				const uint32_t grid_kind = kind == 0 ? 0 : (kind - 1) % DEFORM_GRID_KIND_COUNT + 1;
+				uint32_t end = run + 1 < batch.grid_runs_count ? runs[run + 1] >> DEFORM_GRID_RUN_KIND_BITS : batch.instance_count;
+				if (kind != 0) {
+					while (run + 2 < batch.grid_runs_count && (runs[run + 1] & DEFORM_GRID_RUN_KIND_MASK) == 0 && (runs[run + 2] & DEFORM_GRID_RUN_KIND_MASK) == kind && (runs[run + 2] >> DEFORM_GRID_RUN_KIND_BITS) - end <= DEFORM_MERGE_PLAIN) {
+						run += 2;
+						end = run + 1 < batch.grid_runs_count ? runs[run + 1] >> DEFORM_GRID_RUN_KIND_BITS : batch.instance_count;
+					}
+				}
+				if (end <= first) {
+					continue;
+				}
+				uint32_t flags = batch.flags;
+				if (kind != 0) {
+					flags |= BATCH_FLAGS_DEFORM_GRID | (grid_kind == 2 ? BATCH_FLAGS_DEFORM_DENSE : 0) | (grid_kind == 3 ? BATCH_FLAGS_DEFORM_WARP : 0);
+				}
+				material_storage->shaders.canvas_shader.version_set_uniform(CanvasShaderGLES3::BATCH_FLAGS, flags, state.batch_shader_version, CanvasShaderGLES3::MODE_DEFAULT, state.batch_specialization);
+				glBindVertexArray(kind == 0 ? data.indexed_quad_array : data.grid_quad_arrays[kind - 1]);
+				glBindBuffer(GL_ARRAY_BUFFER, instance_buffer);
+				_enable_attributes((batch.start + first) * sizeof(InstanceData), false);
+				const uint32_t columns = grid_kind == 3 ? DEFORM_WARP_GRID_COLUMNS : DEFORM_GRID_COLUMNS;
+				const uint32_t rows = grid_kind == 3 ? DEFORM_WARP_GRID_ROWS : grid_kind == 2 ? DEFORM_DENSE_GRID_ROWS : DEFORM_GRID_ROWS;
+				glDrawElementsInstanced(GL_TRIANGLES, kind == 0 ? 6 : columns * rows * 6, GL_UNSIGNED_INT, nullptr, end - first);
+
+				if (r_render_info) {
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += end - first;
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += (kind == 0 ? 2 : 2 * columns * rows) * (end - first);
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+				}
+			}
+			glBindVertexArray(0);
 		} break;
 
 		case Item::Command::TYPE_POLYGON: {
@@ -1773,6 +1835,55 @@ void RasterizerCanvasGLES3::_render_batch(Light *p_lights, uint32_t p_index, Ren
 	}
 }
 
+void RasterizerCanvasGLES3::_note_grid_instance(uint32_t p_kind) {
+	Batch &batch = state.canvas_instance_batches[state.current_batch_index];
+	if (!batch.use_grid) {
+		batch.use_grid = true;
+		batch.specialization |= CanvasShaderGLES3::USE_DEFORM;
+		batch.grid_runs_start = state.grid_runs.size();
+		if (batch.instance_count > 0) {
+			state.grid_runs.push_back(0);
+		}
+		state.grid_runs.push_back((batch.instance_count << DEFORM_GRID_RUN_KIND_BITS) | p_kind);
+		batch.grid_runs_count = state.grid_runs.size() - batch.grid_runs_start;
+		batch.last_grid_kind = p_kind;
+		return;
+	}
+	if (batch.last_grid_kind != p_kind) {
+		state.grid_runs.push_back((batch.instance_count << DEFORM_GRID_RUN_KIND_BITS) | p_kind);
+		batch.grid_runs_count++;
+		batch.last_grid_kind = p_kind;
+	}
+}
+
+uint32_t RasterizerCanvasGLES3::_deform_rect(uint32_t p_index, uint32_t p_deform, const Transform2D &p_world, const Rect2 &p_rect) {
+	Transform2D move;
+	DeformRectKind kind = deform_classify_rect(p_deform & DEFORM_CHAIN_MASK, p_world, p_rect, move);
+	if (kind == DEFORM_RECT_RIGID && (p_deform >> DEFORM_MASK_FOLLOW_SHIFT) != 0) {
+		// A moved quad has no straight position left for the masks that follow the bend.
+		kind = DEFORM_RECT_GRID;
+	}
+	switch (kind) {
+		case DEFORM_RECT_STILL:
+			return 0;
+		case DEFORM_RECT_RIGID:
+			_update_transform_2d_to_mat2x3(move * p_world, state.instance_data_array[p_index].world);
+			return 0;
+		default:
+			break;
+	}
+	uint32_t order = 0;
+	if (p_deform & DEFORM_TIP_UNDER) {
+		order = deform_rect_order(p_deform, p_world, p_rect,
+				Vector2(state.instance_data_array[p_index].src_rect[2], state.instance_data_array[p_index].src_rect[3]), kind == DEFORM_RECT_WARP_GRID);
+	}
+	state.instance_data_array[p_index].reserved = p_deform & ~(DEFORM_TIP_UNDER | DEFORM_DENSE_GRID);
+	if (kind == DEFORM_RECT_WARP_GRID) {
+		return 3 + order * DEFORM_GRID_KIND_COUNT;
+	}
+	return ((p_deform & DEFORM_DENSE_GRID) ? 2 : 1) + order * DEFORM_GRID_KIND_COUNT;
+}
+
 void RasterizerCanvasGLES3::_add_to_batch(uint32_t &r_index, bool &r_batch_broken) {
 	Batch &batch = state.canvas_instance_batches[state.current_batch_index];
 	if ((batch.command_type == Item::Command::TYPE_RECT || batch.command_type == Item::Command::TYPE_TEXTURE_PAGE_RECT || batch.command_type == Item::Command::TYPE_NINEPATCH) &&
@@ -1819,7 +1930,12 @@ void RasterizerCanvasGLES3::_new_batch(bool &r_batch_broken) {
 	// Copy the properties of the current batch, we will manually update the things that changed.
 	Batch new_batch = state.canvas_instance_batches[state.current_batch_index];
 	new_batch.instance_count = 0;
-	new_batch.specialization &= ~CanvasShaderGLES3::USE_MASKS;
+	new_batch.specialization &= ~(CanvasShaderGLES3::USE_MASKS | CanvasShaderGLES3::USE_DEFORM);
+	// Grid runs belong to the batch that recorded them.
+	new_batch.use_grid = false;
+	new_batch.last_grid_kind = 0;
+	new_batch.grid_runs_start = state.grid_runs.size();
+	new_batch.grid_runs_count = 0;
 	new_batch.start = state.canvas_instance_batches[state.current_batch_index].start + state.canvas_instance_batches[state.current_batch_index].instance_count;
 	new_batch.instance_buffer_index = state.current_instance_buffer_index;
 	state.current_batch_index++;
@@ -3076,11 +3192,46 @@ RasterizerCanvasGLES3::RasterizerCanvasGLES3() {
 		glBindVertexArray(0);
 	}
 
+	{
+		// Deform grids: vertex y * (columns + 1) + x, two triangles per cell.
+		const uint32_t column_counts[DEFORM_GRID_KIND_COUNT] = { DEFORM_GRID_COLUMNS, DEFORM_GRID_COLUMNS, DEFORM_WARP_GRID_COLUMNS };
+		const uint32_t row_counts[DEFORM_GRID_KIND_COUNT] = { DEFORM_GRID_ROWS, DEFORM_DENSE_GRID_ROWS, DEFORM_WARP_GRID_ROWS };
+		for (uint32_t grid = 0; grid < DEFORM_GRID_COUNT; grid++) {
+			const uint32_t columns = column_counts[grid % DEFORM_GRID_KIND_COUNT];
+			const uint32_t rows = row_counts[grid % DEFORM_GRID_KIND_COUNT];
+			const uint32_t order = grid / DEFORM_GRID_KIND_COUNT;
+			LocalVector<uint32_t> indices;
+			for (uint32_t y = 0; y < rows; y++) {
+				for (uint32_t x = 0; x < columns; x++) {
+					const uint32_t a = deform_grid_vertex(x, y, columns, rows, order);
+					const uint32_t b = deform_grid_vertex(x + 1, y, columns, rows, order);
+					const uint32_t c = deform_grid_vertex(x, y + 1, columns, rows, order);
+					const uint32_t d = deform_grid_vertex(x + 1, y + 1, columns, rows, order);
+					indices.push_back(a);
+					indices.push_back(c);
+					indices.push_back(d);
+					indices.push_back(a);
+					indices.push_back(d);
+					indices.push_back(b);
+				}
+			}
+			glGenVertexArrays(1, &data.grid_quad_arrays[grid]);
+			glBindVertexArray(data.grid_quad_arrays[grid]);
+			glBindBuffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
+			glGenBuffers(1, &data.grid_quad_buffers[grid]);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.grid_quad_buffers[grid]);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint32_t) * indices.size(), indices.ptr(), GL_STATIC_DRAW);
+			glBindVertexArray(0);
+		}
+	}
+
 	String global_defines;
 	global_defines += "#define MAX_GLOBAL_SHADER_UNIFORMS 256\n"; // TODO: this is arbitrary for now
 	global_defines += "#define MAX_LIGHTS " + itos(data.max_lights_per_render) + "\n";
 
 	GLES3::MaterialStorage::get_singleton()->shaders.canvas_shader.initialize(global_defines, 1);
+	// Every canvas material compiles the deform version of a rectangle shader with its plain version: the default
+	// material while the game loads, a custom one at its first use, so the first bent picture compiles nothing.
 	data.canvas_shader_default_version = GLES3::MaterialStorage::get_singleton()->shaders.canvas_shader.version_create();
 
 	state.shadow_texture_size = GLOBAL_GET("rendering/2d/shadow_atlas/size");
@@ -3146,6 +3297,8 @@ void fragment() {
 
 RasterizerCanvasGLES3::~RasterizerCanvasGLES3() {
 	glDeleteTextures(1, &state.mask_rows_texture);
+	glDeleteVertexArrays(DEFORM_GRID_COUNT, data.grid_quad_arrays);
+	glDeleteBuffers(DEFORM_GRID_COUNT, data.grid_quad_buffers);
 	singleton = nullptr;
 
 	GLES3::MaterialStorage *material_storage = GLES3::MaterialStorage::get_singleton();

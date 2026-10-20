@@ -101,6 +101,9 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 
 		BATCH_FLAGS_DEFAULT_NORMAL_MAP_USED = (1 << 9),
 		BATCH_FLAGS_DEFAULT_SPECULAR_MAP_USED = (1 << 10),
+		BATCH_FLAGS_DEFORM_GRID = (1 << 11),
+		BATCH_FLAGS_DEFORM_DENSE = (1 << 12),
+		BATCH_FLAGS_DEFORM_WARP = (1 << 13),
 	};
 
 	enum {
@@ -151,6 +154,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 				uint32_t mask_outside_bits : 2;
 				uint32_t mask_shared_basis : 1;
 				uint32_t mask_mipmaps : 1;
+				// Some rectangle of the batch is drawn as a deform grid; without it the deform code is left out.
+				uint32_t use_deform : 1;
 			};
 		};
 	};
@@ -221,12 +226,17 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		RID default_version_rd_shader;
 		RID quad_index_buffer;
 		RID quad_index_array;
+		// Deform grids: [0] DEFORM_GRID_COLUMNS by DEFORM_GRID_ROWS, [1] DEFORM_GRID_COLUMNS by DEFORM_DENSE_GRID_ROWS,
+		// [2] DEFORM_WARP_GRID_COLUMNS by DEFORM_WARP_GRID_ROWS.
+		RID grid_index_buffers[DEFORM_GRID_COUNT];
+		RID grid_index_arrays[DEFORM_GRID_COUNT];
 		RD::VertexFormatID quad_vertex_format_id;
 		RD::VertexFormatID primitive_vertex_format_id;
 		ShaderCompiler compiler;
 		uint32_t pipeline_compilations[RSE::PIPELINE_SOURCE_MAX] = {};
 		std::atomic<uint32_t> pipeline_waits = { 0 };
 		std::atomic<uint32_t> general_mask_batches = { 0 };
+		std::atomic<uint32_t> compiling_shader_count = { 0 };
 		Mutex mutex;
 	} shader;
 
@@ -622,6 +632,13 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		bool region_mip_nearest = false;
 		bool region_mip_trilinear = false;
 		bool has_blend = false;
+		// Some rectangle of the batch is drawn as a deform grid. Its plain and grid runs are state.grid_runs entries
+		// grid_runs_start onwards: (first instance << DEFORM_GRID_RUN_KIND_BITS) | kind. Kind 0 is plain;
+		// kinds 1..12 select the grid density and row/column order, three densities per order.
+		bool use_grid = false;
+		uint8_t last_grid_kind = 0;
+		uint32_t grid_runs_start = 0;
+		uint32_t grid_runs_count = 0;
 		float region_mipmap_bias = 0.0f;
 
 		// batch-specific data
@@ -695,6 +712,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	}
 
 	struct State {
+		RID deform_buffer;
+		uint32_t deform_capacity = 0;
 		RID mask_buffer;
 		RID mask_page;
 		uint32_t mask_capacity = 1024;
@@ -724,10 +743,12 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 			float shadow_pixel_size;
 			uint32_t flags;
 			uint32_t mask_entries_base;
-			uint32_t mask_padding[3] = {};
+			uint32_t deform_record_base;
+			uint32_t mask_padding[2] = {};
 		};
 
 		LocalVector<Batch> canvas_instance_batches;
+		LocalVector<uint32_t> grid_runs;
 		LocalVector<BatchMasks> batch_masks;
 		uint32_t current_batch_index = 0;
 
@@ -805,6 +826,16 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	void _render_batch_items(RenderTarget p_to_render_target, int p_item_count, const Transform2D &p_canvas_transform_inverse, Light *p_lights, bool &r_sdf_used, bool p_to_backbuffer = false, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
 	void _record_mask_uniforms(Batch *&r_batch, bool &r_batch_broken, InstanceData *p_instance, uint16_t p_mask_set, float p_screen_area);
 	// Returns false for rectangles hidden by an invalid mask set; those are not drawn.
+	void _note_grid_instance(Batch *p_batch, uint32_t p_kind);
+	uint32_t _deform_rect(Batch *p_batch, InstanceData *p_instance, uint32_t p_deform, const Transform2D &p_world, const Rect2 &p_rect);
+	// Writes the deform word of a rectangle and keeps the grid runs of its batch; plain items only check the run state.
+	// The world transform is p_base * p_draw, multiplied only for rectangles with a deform chain.
+	_FORCE_INLINE_ void _record_deform(Batch *p_batch, InstanceData *p_instance, uint32_t p_deform, const Transform2D &p_base, const Transform2D &p_draw, const Rect2 &p_rect) {
+		const uint32_t kind = unlikely(p_deform & DEFORM_CHAIN_MASK) ? _deform_rect(p_batch, p_instance, p_deform, p_base * p_draw, p_rect) : 0;
+		if (unlikely(p_batch->use_grid || kind != 0)) {
+			_note_grid_instance(p_batch, kind);
+		}
+	}
 	_FORCE_INLINE_ bool _record_masks(Batch *&r_batch, bool &r_batch_broken, InstanceData *p_instance, const Item *p_item, const Transform2D &p_draw_transform, const Size2 &p_size) {
 		if (likely((p_item->mask_set | uint16_t(r_batch->use_masks)) == 0)) {
 			return true;
@@ -819,6 +850,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	static const ShaderVariant general_mask_variants[3][2];
 	void _track_compilations(CanvasShaderData *p_shader_data);
 	void _queue_general_mask_pipelines(CanvasShaderData *p_shader_data, const PipelineKey &p_plain_key);
+	// Queues the general mask pipelines of a plain rectangle key now, or when the first mask is created.
+	void _queue_mask_pipelines_of(CanvasShaderData *p_shader_data, const PipelineKey &p_plain_key);
 	void _set_masks_in_use();
 	RID _get_rect_pipeline(CanvasShaderData *p_shader_data, PipelineKey &r_pipeline_key, PushConstant &r_push_constant, bool &r_general_masks);
 	void _record_item_commands(const Item *p_item, RenderTarget p_render_target, const Transform2D &p_base_transform, Item *&r_current_clip, Light *p_lights, bool &r_batch_broken, bool &r_sdf_used, Batch *&r_current_batch);
@@ -864,6 +897,7 @@ public:
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) override;
 	uint32_t get_pipeline_waits() override;
 	uint32_t get_general_mask_batches() override;
+	uint32_t get_compiling_shader_count() override;
 	void mask_created() override;
 
 	void set_time(double p_time);

@@ -3329,6 +3329,12 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("canvas_item_remove_mask", "item", "mask"), &RenderingServer::canvas_item_remove_mask);
 	ClassDB::bind_method(D_METHOD("canvas_item_set_mask_excluded", "item", "mask", "excluded"), &RenderingServer::canvas_item_set_mask_excluded);
 	ClassDB::bind_method(D_METHOD("canvas_set_mask_page", "texture"), &RenderingServer::canvas_set_mask_page);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_deform_joints", "item", "joints"), &RenderingServer::canvas_item_set_deform_joints);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_deform_angles", "item", "angles"), &RenderingServer::canvas_item_set_deform_angles);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_deform_stretch", "item", "stretch"), &RenderingServer::canvas_item_set_deform_stretch);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_deform_warp", "item", "columns", "rows", "rect", "offsets", "strength"), &RenderingServer::canvas_item_set_deform_warp);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_deform_flags", "item", "flags"), &RenderingServer::canvas_item_set_deform_flags);
+	ClassDB::bind_method(D_METHOD("canvas_item_set_deform_excluded", "item", "excluded"), &RenderingServer::canvas_item_set_deform_excluded);
 	ClassDB::bind_method(D_METHOD("canvas_item_create"), &RenderingServer::canvas_item_create);
 	ClassDB::bind_method(D_METHOD("canvas_item_set_parent", "item", "parent"), &RenderingServer::canvas_item_set_parent);
 	ClassDB::bind_method(D_METHOD("canvas_item_set_default_texture_filter", "item", "filter"), &RenderingServer::canvas_item_set_default_texture_filter);
@@ -3409,6 +3415,9 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
 	BIND_ENUM_CONSTANT(RSE::CANVAS_ITEM_TEXTURE_REPEAT_MIRROR);
 	BIND_ENUM_CONSTANT(RSE::CANVAS_ITEM_TEXTURE_REPEAT_MAX);
+
+	BIND_BITFIELD_FLAG(RSE::CANVAS_DEFORM_FLAG_TIP_UNDER);
+	BIND_BITFIELD_FLAG(RSE::CANVAS_DEFORM_FLAG_DENSE_GRID);
 
 	BIND_ENUM_CONSTANT(RSE::CANVAS_GROUP_MODE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::CANVAS_GROUP_MODE_CLIP_ONLY);
@@ -3571,6 +3580,7 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_WAITS_CANVAS);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_GENERAL_MASK_BATCHES_CANVAS);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_SHADERS_COMPILING_CANVAS);
 
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_CANVAS);
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_MESH);

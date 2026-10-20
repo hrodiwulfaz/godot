@@ -72,6 +72,9 @@ class RasterizerCanvasGLES3 : public RendererCanvasRender {
 
 		BATCH_FLAGS_DEFAULT_NORMAL_MAP_USED = (1 << 9),
 		BATCH_FLAGS_DEFAULT_SPECULAR_MAP_USED = (1 << 10),
+		BATCH_FLAGS_DEFORM_GRID = (1 << 11),
+		BATCH_FLAGS_DEFORM_DENSE = (1 << 12),
+		BATCH_FLAGS_DEFORM_WARP = (1 << 13),
 	};
 
 	enum {
@@ -179,7 +182,7 @@ public:
 		uint32_t directional_light_count;
 		float tex_to_sdf;
 		uint32_t mask_entries_base;
-		uint32_t pad2;
+		uint32_t deform_texel_base;
 	};
 
 	static_assert(sizeof(StateBuffer) % 16 == 0, "2D state UBO size must be a multiple of 16 bytes");
@@ -242,6 +245,10 @@ public:
 
 		GLuint indexed_quad_buffer;
 		GLuint indexed_quad_array;
+		// Deform grids: [0] DEFORM_GRID_COLUMNS by DEFORM_GRID_ROWS, [1] DEFORM_GRID_COLUMNS by DEFORM_DENSE_GRID_ROWS,
+		// [2] DEFORM_WARP_GRID_COLUMNS by DEFORM_WARP_GRID_ROWS.
+		GLuint grid_quad_buffers[DEFORM_GRID_COUNT] = {};
+		GLuint grid_quad_arrays[DEFORM_GRID_COUNT] = {};
 
 		GLuint particle_quad_vertices;
 		GLuint particle_quad_array;
@@ -283,6 +290,13 @@ public:
 
 		uint32_t flags = 0;
 		uint32_t specular_shininess = 0.0;
+		// Some rectangle of the batch is drawn as a deform grid. Its plain and grid runs are state.grid_runs entries
+		// grid_runs_start onwards: (first instance << DEFORM_GRID_RUN_KIND_BITS) | kind. Kind 0 is plain;
+		// kinds 1..12 select the grid density and row/column order, three densities per order.
+		bool use_grid = false;
+		uint8_t last_grid_kind = 0;
+		uint32_t grid_runs_start = 0;
+		uint32_t grid_runs_count = 0;
 
 		bool lights_disabled = false;
 	};
@@ -312,6 +326,11 @@ public:
 
 		GLuint mask_rows_texture = 0;
 		uint32_t mask_rows_capacity = 0;
+		// Deform rows follow the mask rows in mask_rows_texture from this texel, which starts a texture row.
+		uint32_t deform_texel_base = 0;
+		LocalVector<uint32_t> grid_runs;
+		RID batch_shader_version;
+		uint64_t batch_specialization = 0;
 
 		GLuint shadow_texture = 0;
 		GLuint shadow_depth_buffer = 0;
@@ -395,6 +414,15 @@ public:
 
 	void _new_batch(bool &r_batch_broken);
 	void _add_to_batch(uint32_t &r_index, bool &r_batch_broken);
+	void _note_grid_instance(uint32_t p_kind);
+	uint32_t _deform_rect(uint32_t p_index, uint32_t p_deform, const Transform2D &p_world, const Rect2 &p_rect);
+	// The world transform is p_base * p_draw, multiplied only for rectangles with a deform chain.
+	_FORCE_INLINE_ void _record_deform(uint32_t p_index, uint32_t p_deform, const Transform2D &p_base, const Transform2D &p_draw, const Rect2 &p_rect) {
+		const uint32_t kind = unlikely(p_deform & DEFORM_CHAIN_MASK) ? _deform_rect(p_index, p_deform, p_base * p_draw, p_rect) : 0;
+		if (unlikely(state.canvas_instance_batches[state.current_batch_index].use_grid || kind != 0)) {
+			_note_grid_instance(kind);
+		}
+	}
 	void _allocate_instance_data_buffer();
 	void _allocate_instance_buffer();
 	void _enable_attributes(uint32_t p_start, bool p_primitive, uint32_t p_rate = 1);
@@ -407,7 +435,9 @@ public:
 		}
 	}
 
-	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) override { return 0; }
+	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) override {
+		return p_source == RSE::PIPELINE_SOURCE_CANVAS ? GLES3::MaterialStorage::get_singleton()->shaders.canvas_shader.get_compilation_count() : 0;
+	}
 
 	static RasterizerCanvasGLES3 *get_singleton();
 	RasterizerCanvasGLES3();

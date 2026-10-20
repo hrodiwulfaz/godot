@@ -1,13 +1,17 @@
 #define MAX_LIGHTS_PER_ITEM uint(16)
 
-#ifdef USE_MASKS
+// Mask rows, then deform rows from texel deform_texel_base, share one texture.
+#if defined(USE_MASKS) || defined(USE_DEFORM)
 uniform highp usampler2D mask_rows; //texunit:-8
-uniform sampler2DArray mask_page; //texunit:-9
-uniform bool mask_mipmaps;
 
 uvec4 read_mask_row(uint row) {
 	return texelFetch(mask_rows, ivec2(row % 1024u, row / 1024u), 0);
 }
+#endif
+
+#ifdef USE_MASKS
+uniform sampler2DArray mask_page; //texunit:-9
+uniform bool mask_mipmaps;
 #endif
 
 #define M_PI 3.14159265359
@@ -39,6 +43,22 @@ uvec4 read_mask_row(uint row) {
 
 #define BATCH_FLAGS_DEFAULT_NORMAL_MAP_USED uint(1 << 9)
 #define BATCH_FLAGS_DEFAULT_SPECULAR_MAP_USED uint(1 << 10)
+#define BATCH_FLAGS_DEFORM_GRID uint(1 << 11)
+#define BATCH_FLAGS_DEFORM_DENSE uint(1 << 12)
+#define BATCH_FLAGS_DEFORM_WARP uint(1 << 13)
+
+// Deform word of a rectangle (instance word at byte 100): chain and one bit per mask slot that follows the bend.
+#define DEFORM_CHAIN_MASK 0x3FFFFFu
+// Chain words: record row offset plus one, and in the high byte the follow codes of two mask slots.
+#define DEFORM_RECORD_MASK 0xFFFFFFu
+#define DEFORM_FOLLOW_CODE_SHIFT 24u
+// Joints per record, and bands per rectangle, that place grid lines.
+#define DEFORM_BAND_JOINTS 4u
+#define DEFORM_GRID_COLUMNS 4u
+#define DEFORM_GRID_ROWS 16u
+#define DEFORM_DENSE_GRID_ROWS 32u
+#define DEFORM_WARP_GRID_COLUMNS 24u
+#define DEFORM_WARP_GRID_ROWS 32u
 
 layout(std140) uniform GlobalShaderUniformData { //ubo:1
 	vec4 global_shader_uniforms[MAX_GLOBAL_SHADER_UNIFORMS];
@@ -60,7 +80,7 @@ layout(std140) uniform CanvasData { //ubo:0
 	uint directional_light_count;
 	float tex_to_sdf;
 	uint mask_entries_base;
-	uint pad2;
+	uint deform_texel_base;
 };
 
 #ifndef DISABLE_LIGHTING

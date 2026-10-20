@@ -397,6 +397,13 @@ RID RendererCanvasRenderRD::_create_base_uniform_set(RID p_to_render_target, boo
 		u.append_id(state.mask_buffer);
 		uniforms.push_back(u);
 	}
+	{
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.binding = 30;
+		u.append_id(state.deform_buffer);
+		uniforms.push_back(u);
+	}
 
 	{
 		RD::Uniform u;
@@ -539,6 +546,7 @@ void RendererCanvasRenderRD::_track_compilations(CanvasShaderData *p_shader_data
 	if (!p_shader_data->compilations_tracked) {
 		p_shader_data->compilations_tracked = true;
 		state.shaders_with_compilations.push_back(p_shader_data);
+		shader.compiling_shader_count.fetch_add(1, std::memory_order_relaxed);
 	}
 }
 
@@ -557,6 +565,18 @@ void RendererCanvasRenderRD::_queue_general_mask_pipelines(CanvasShaderData *p_s
 	}
 }
 
+void RendererCanvasRenderRD::_queue_mask_pipelines_of(CanvasShaderData *p_shader_data, const PipelineKey &p_plain_key) {
+	if (state.masks_in_use) {
+		// The general mask pipelines of this material and format compile in the background after the plain one, so masks can appear without a wait.
+		_queue_general_mask_pipelines(p_shader_data, p_plain_key);
+		return;
+	}
+	if (p_shader_data->plain_rect_keys.is_empty()) {
+		state.shaders_with_plain_keys.push_back(p_shader_data);
+	}
+	p_shader_data->plain_rect_keys.push_back(p_plain_key);
+}
+
 RID RendererCanvasRenderRD::_get_rect_pipeline(CanvasShaderData *p_shader_data, PipelineKey &r_pipeline_key, PushConstant &r_push_constant, bool &r_general_masks) {
 	r_pipeline_key.ubershader = 0;
 	r_push_constant.shader_specialization = {};
@@ -569,14 +589,15 @@ RID RendererCanvasRenderRD::_get_rect_pipeline(CanvasShaderData *p_shader_data, 
 	if (r_pipeline_key.variant <= SHADER_VARIANT_NINEPATCH) {
 		pipeline = p_shader_data->pipeline_hash_map.get_pipeline(r_pipeline_key, hash, true, RSE::PIPELINE_SOURCE_CANVAS);
 		if (pipeline.is_valid() && !r_pipeline_key.shader_specialization.use_lcd) {
-			if (state.masks_in_use) {
-				// The general mask pipelines of this material and format compile in the background after the plain one, so masks can appear without a wait.
-				_queue_general_mask_pipelines(p_shader_data, r_pipeline_key);
-			} else {
-				if (p_shader_data->plain_rect_keys.is_empty()) {
-					state.shaders_with_plain_keys.push_back(p_shader_data);
+			_queue_mask_pipelines_of(p_shader_data, r_pipeline_key);
+			if (r_pipeline_key.variant != SHADER_VARIANT_NINEPATCH && !r_pipeline_key.shader_specialization.use_deform && !r_pipeline_key.shader_specialization.use_msdf) {
+				// The grid pipeline of this material and format compiles in the background after the plain one, with its general mask pipelines, so the first bent picture does not wait for them. Nine-patches never bend.
+				PipelineKey bent = r_pipeline_key;
+				bent.shader_specialization.use_deform = true;
+				if (p_shader_data->pipeline_hash_map.compile_pipeline(bent, bent.hash(), RSE::PIPELINE_SOURCE_CANVAS, false)) {
+					_track_compilations(p_shader_data);
+					_queue_mask_pipelines_of(p_shader_data, bent);
 				}
-				p_shader_data->plain_rect_keys.push_back(r_pipeline_key);
 			}
 		}
 		return pipeline;
@@ -650,7 +671,22 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 	} else {
 		_set_masks_in_use();
 	}
-	if (page != state.mask_page || uint32_t(mask_data.rows.size()) > state.mask_capacity) {
+	const uint32_t deform_rows = deform_data.rows.size() / 4;
+	const bool new_deform_buffer = state.deform_buffer.is_null() || deform_rows > state.deform_capacity;
+	if (new_deform_buffer) {
+		state.deform_capacity = MAX(state.deform_capacity, 256u);
+		while (state.deform_capacity < deform_rows) {
+			state.deform_capacity *= 2;
+		}
+		if (state.deform_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(state.deform_buffer);
+		}
+		state.deform_buffer = RD::get_singleton()->storage_buffer_create(state.deform_capacity * 16);
+	}
+	if (deform_rows > 0) {
+		RD::get_singleton()->buffer_update(state.deform_buffer, 0, deform_rows * 16, deform_data.rows.ptr());
+	}
+	if (new_deform_buffer || page != state.mask_page || uint32_t(mask_data.rows.size()) > state.mask_capacity) {
 		for (RID uniform_set : state.mask_uniform_sets) {
 			if (RD::get_singleton()->uniform_set_is_valid(uniform_set)) {
 				RD::get_singleton()->free_rid(uniform_set);
@@ -908,6 +944,7 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 		state_buffer.flags = use_linear_colors ? CANVAS_FLAGS_CONVERT_ATTRIBUTES_TO_LINEAR : 0;
 
 		state_buffer.mask_entries_base = mask_data.entries_base;
+		state_buffer.deform_record_base = deform_data.record_base;
 		RD::get_singleton()->buffer_update(state.canvas_state_buffer, 0, sizeof(State::Buffer), &state_buffer);
 	}
 
@@ -1877,6 +1914,7 @@ RendererCanvasRenderRD::CanvasShaderData::~CanvasShaderData() {
 	}
 	if (compilations_tracked) {
 		renderer->state.shaders_with_compilations.erase(this);
+		renderer->shader.compiling_shader_count.fetch_sub(1, std::memory_order_relaxed);
 	}
 
 	if (version.is_valid()) {
@@ -1925,6 +1963,7 @@ void RendererCanvasRenderRD::update() {
 		} else {
 			shader_data->compilations_tracked = false;
 			state.shaders_with_compilations.remove_at_unordered(i);
+			shader.compiling_shader_count.fetch_sub(1, std::memory_order_relaxed);
 		}
 	}
 	PipelineCompilationRD::release_completed_retired();
@@ -2206,6 +2245,38 @@ RendererCanvasRenderRD::RendererCanvasRenderRD() {
 	}
 
 	{
+		// Deform grids: vertex y * (columns + 1) + x, two triangles per cell.
+		const uint32_t column_counts[DEFORM_GRID_KIND_COUNT] = { DEFORM_GRID_COLUMNS, DEFORM_GRID_COLUMNS, DEFORM_WARP_GRID_COLUMNS };
+		const uint32_t row_counts[DEFORM_GRID_KIND_COUNT] = { DEFORM_GRID_ROWS, DEFORM_DENSE_GRID_ROWS, DEFORM_WARP_GRID_ROWS };
+		for (uint32_t grid = 0; grid < DEFORM_GRID_COUNT; grid++) {
+			const uint32_t columns = column_counts[grid % DEFORM_GRID_KIND_COUNT];
+			const uint32_t rows = row_counts[grid % DEFORM_GRID_KIND_COUNT];
+			const uint32_t order = grid / DEFORM_GRID_KIND_COUNT;
+			const uint32_t index_count = columns * rows * 6;
+			Vector<uint8_t> grid_indices;
+			grid_indices.resize(index_count * sizeof(uint16_t));
+			uint16_t *indices = (uint16_t *)grid_indices.ptrw();
+			uint32_t at = 0;
+			for (uint32_t y = 0; y < rows; y++) {
+				for (uint32_t x = 0; x < columns; x++) {
+					const uint16_t a = deform_grid_vertex(x, y, columns, rows, order);
+					const uint16_t b = deform_grid_vertex(x + 1, y, columns, rows, order);
+					const uint16_t c = deform_grid_vertex(x, y + 1, columns, rows, order);
+					const uint16_t d = deform_grid_vertex(x + 1, y + 1, columns, rows, order);
+					indices[at++] = a;
+					indices[at++] = c;
+					indices[at++] = d;
+					indices[at++] = a;
+					indices[at++] = d;
+					indices[at++] = b;
+				}
+			}
+			shader.grid_index_buffers[grid] = RD::get_singleton()->index_buffer_create(index_count, RenderingDevice::INDEX_BUFFER_FORMAT_UINT16, grid_indices);
+			shader.grid_index_arrays[grid] = RD::get_singleton()->index_array_create(shader.grid_index_buffers[grid], 0, index_count);
+		}
+	}
+
+	{
 		Vector<RD::VertexAttribute> vf;
 		uint32_t offset = 0;
 		RD::VertexAttribute vd;
@@ -2439,6 +2510,10 @@ uint32_t RendererCanvasRenderRD::get_general_mask_batches() {
 	return shader.general_mask_batches.load(std::memory_order_relaxed);
 }
 
+uint32_t RendererCanvasRenderRD::get_compiling_shader_count() {
+	return shader.compiling_shader_count.load(std::memory_order_relaxed);
+}
+
 void RendererCanvasRenderRD::_render_batch_items(RenderTarget p_to_render_target, int p_item_count, const Transform2D &p_canvas_transform_inverse, Light *p_lights, bool &r_sdf_used, bool p_to_backbuffer, RenderingServerTypes::RenderInfo *r_render_info) {
 	// Record batches
 	{
@@ -2595,6 +2670,59 @@ void RendererCanvasRenderRD::_render_batch_items(RenderTarget p_to_render_target
 	state.current_batch_index = 0;
 	state.canvas_instance_batches.clear();
 	state.batch_masks.clear();
+	state.grid_runs.clear();
+}
+
+void RendererCanvasRenderRD::_note_grid_instance(Batch *p_batch, uint32_t p_kind) {
+	if (!p_batch->use_grid) {
+		p_batch->use_grid = true;
+		p_batch->grid_runs_start = state.grid_runs.size();
+		if (p_batch->instance_count > 0) {
+			state.grid_runs.push_back(0);
+		}
+		state.grid_runs.push_back((p_batch->instance_count << DEFORM_GRID_RUN_KIND_BITS) | p_kind);
+		p_batch->grid_runs_count = state.grid_runs.size() - p_batch->grid_runs_start;
+		p_batch->last_grid_kind = p_kind;
+		return;
+	}
+	if (p_batch->last_grid_kind != p_kind) {
+		state.grid_runs.push_back((p_batch->instance_count << DEFORM_GRID_RUN_KIND_BITS) | p_kind);
+		p_batch->grid_runs_count++;
+		p_batch->last_grid_kind = p_kind;
+	}
+}
+
+uint32_t RendererCanvasRenderRD::_deform_rect(Batch *p_batch, InstanceData *p_instance, uint32_t p_deform, const Transform2D &p_world, const Rect2 &p_rect) {
+	const uint32_t follow = p_deform >> DEFORM_MASK_FOLLOW_SHIFT;
+	Transform2D move;
+	DeformRectKind kind = deform_classify_rect(p_deform & DEFORM_CHAIN_MASK, p_world, p_rect, move);
+	if (kind == DEFORM_RECT_RIGID && follow != 0) {
+		// A moved quad has no straight position left for the masks that follow the bend.
+		kind = DEFORM_RECT_GRID;
+	}
+	switch (kind) {
+		case DEFORM_RECT_STILL:
+			return 0;
+		case DEFORM_RECT_RIGID:
+			_update_transform_2d_to_mat2x3(move * p_world, p_instance->world);
+			return 0;
+		default:
+			break;
+	}
+	uint32_t order = 0;
+	if (p_deform & DEFORM_TIP_UNDER) {
+		order = deform_rect_order(p_deform, p_world, p_rect,
+				Vector2(p_instance->src_rect[2], p_instance->src_rect[3]), kind == DEFORM_RECT_WARP_GRID);
+	}
+	p_instance->reserved = p_deform & ~(DEFORM_TIP_UNDER | DEFORM_DENSE_GRID);
+	if (p_batch->use_masks && follow != 0 && deform_follow_code(p_deform & DEFORM_CHAIN_MASK, 0) != deform_follow_code(p_deform & DEFORM_CHAIN_MASK, 1)) {
+		// The two vertex masks sample different places.
+		state.batch_masks[p_batch->mask_index].masks_same_uv = false;
+	}
+	if (kind == DEFORM_RECT_WARP_GRID) {
+		return 3 + order * DEFORM_GRID_KIND_COUNT;
+	}
+	return ((p_deform & DEFORM_DENSE_GRID) ? 2 : 1) + order * DEFORM_GRID_KIND_COUNT;
 }
 
 void RendererCanvasRenderRD::_record_mask_uniforms(Batch *&r_batch, bool &r_batch_broken, InstanceData *p_instance, uint16_t p_mask_set, float p_screen_area) {
@@ -2937,6 +3065,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 						instance_data->flags |= INSTANCE_FLAGS_USE_ARRAY_LAYER;
 					}
 				}
+				_record_deform(r_current_batch, instance_data, p_item->deform, base_transform, draw_transform, dst_rect);
 
 				_add_to_batch(r_batch_broken, r_current_batch);
 			} break;
@@ -3064,6 +3193,7 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				instance_data->dst_rect[1] = dst_rect.position.y;
 				instance_data->dst_rect[2] = dst_rect.size.width;
 				instance_data->dst_rect[3] = dst_rect.size.height;
+				_record_deform(r_current_batch, instance_data, (has_msdf || has_lcd) ? 0 : p_item->deform, base_transform, draw_transform, dst_rect);
 
 				_add_to_batch(r_batch_broken, r_current_batch);
 			} break;
@@ -3592,6 +3722,7 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	pipeline_key.shader_specialization.region_mip_nearest = is_page_batch && p_batch->region_mip_nearest;
 	pipeline_key.shader_specialization.region_mip_trilinear = is_page_batch && p_batch->region_mip_trilinear;
 	pipeline_key.shader_specialization.mask_mipmaps = mask_variant && p_batch->tex_info->mipmapped;
+	pipeline_key.shader_specialization.use_deform = p_batch->use_grid;
 	if (uniform_masks) {
 		const bool only_masked = p_batch->instance_count == masks.masked_instance_count;
 		pipeline_key.shader_specialization.mask_all_valid = only_masked && masks.minimum_mask_count == masks.mask_count && masks.masks_valid;
@@ -3624,8 +3755,9 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 				RD::get_singleton()->draw_list_set_blend_constants(p_draw_list, p_batch->modulate);
 			}
 
-			if (uniform_masks && !general_masks) {
-				PushConstantMasks mask_constants = {};
+			PushConstantMasks mask_constants = {};
+			const bool use_mask_constants = uniform_masks && !general_masks;
+			if (use_mask_constants) {
 				mask_constants.base = push_constant;
 				for (uint32_t i = 0; i < masks.mask_uniform_count; i++) {
 					const float *data = masks.mask_uniforms[i];
@@ -3636,20 +3768,67 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 					mask_constants.extras[i][3] = data[6];
 				}
 				memcpy(mask_constants.basis, masks.mask_basis, sizeof(mask_constants.basis));
-				RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &mask_constants, sizeof(mask_constants));
-			} else {
-				RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &push_constant, sizeof(push_constant));
 			}
 			FixedVector<RID, 1> vb = { p_batch->instance_buffer };
 			FixedVector<uint64_t, 1> vo = { uint64_t(p_batch->start) * sizeof(InstanceData) };
-			RD::get_singleton()->draw_list_bind_vertex_buffers_format(p_draw_list, shader.quad_vertex_format_id, 1, vb, vo);
-			RD::get_singleton()->draw_list_bind_index_array(p_draw_list, shader.quad_index_array);
-			RD::get_singleton()->draw_list_draw(p_draw_list, true, p_batch->instance_count);
+			if (!p_batch->use_grid) {
+				if (use_mask_constants) {
+					RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &mask_constants, sizeof(mask_constants));
+				} else {
+					RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &push_constant, sizeof(push_constant));
+				}
+				RD::get_singleton()->draw_list_bind_vertex_buffers_format(p_draw_list, shader.quad_vertex_format_id, 1, vb, vo);
+				RD::get_singleton()->draw_list_bind_index_array(p_draw_list, shader.quad_index_array);
+				RD::get_singleton()->draw_list_draw(p_draw_list, true, p_batch->instance_count);
 
-			if (r_render_info) {
-				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += p_batch->instance_count;
-				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += 2 * p_batch->instance_count;
-				r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+				if (r_render_info) {
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += p_batch->instance_count;
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += 2 * p_batch->instance_count;
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+				}
+				break;
+			}
+
+			// Each run of plain or grid rectangles is its own draw; a short plain run between grid runs of one kind is
+			// drawn with the grid. A run of another grid kind in between keeps its own grid.
+			const uint32_t base_flags = push_constant.batch_flags;
+			const uint32_t *runs = state.grid_runs.ptr() + p_batch->grid_runs_start;
+			for (uint32_t run = 0; run < p_batch->grid_runs_count; run++) {
+				const uint32_t first = runs[run] >> DEFORM_GRID_RUN_KIND_BITS;
+				const uint32_t kind = runs[run] & DEFORM_GRID_RUN_KIND_MASK;
+				const uint32_t grid_kind = kind == 0 ? 0 : (kind - 1) % DEFORM_GRID_KIND_COUNT + 1;
+				uint32_t end = run + 1 < p_batch->grid_runs_count ? runs[run + 1] >> DEFORM_GRID_RUN_KIND_BITS : p_batch->instance_count;
+				if (kind != 0) {
+					while (run + 2 < p_batch->grid_runs_count && (runs[run + 1] & DEFORM_GRID_RUN_KIND_MASK) == 0 && (runs[run + 2] & DEFORM_GRID_RUN_KIND_MASK) == kind && (runs[run + 2] >> DEFORM_GRID_RUN_KIND_BITS) - end <= DEFORM_MERGE_PLAIN) {
+						run += 2;
+						end = run + 1 < p_batch->grid_runs_count ? runs[run + 1] >> DEFORM_GRID_RUN_KIND_BITS : p_batch->instance_count;
+					}
+				}
+				if (end <= first) {
+					continue;
+				}
+				uint32_t flags = base_flags;
+				if (kind != 0) {
+					flags |= BATCH_FLAGS_DEFORM_GRID | (grid_kind == 2 ? BATCH_FLAGS_DEFORM_DENSE : 0) | (grid_kind == 3 ? BATCH_FLAGS_DEFORM_WARP : 0);
+				}
+				if (use_mask_constants) {
+					mask_constants.base.batch_flags = flags;
+					RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &mask_constants, sizeof(mask_constants));
+				} else {
+					push_constant.batch_flags = flags;
+					RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &push_constant, sizeof(push_constant));
+				}
+				vo[0] = uint64_t(p_batch->start + first) * sizeof(InstanceData);
+				RD::get_singleton()->draw_list_bind_vertex_buffers_format(p_draw_list, shader.quad_vertex_format_id, 1, vb, vo);
+				RD::get_singleton()->draw_list_bind_index_array(p_draw_list, kind == 0 ? shader.quad_index_array : shader.grid_index_arrays[kind - 1]);
+				RD::get_singleton()->draw_list_draw(p_draw_list, true, end - first);
+
+				if (r_render_info) {
+					const uint32_t triangles = kind == 0 ? 2 : grid_kind == 3 ? 2 * DEFORM_WARP_GRID_COLUMNS * DEFORM_WARP_GRID_ROWS : 2 * DEFORM_GRID_COLUMNS * (grid_kind == 2 ? DEFORM_DENSE_GRID_ROWS : DEFORM_GRID_ROWS);
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += end - first;
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += triangles * (end - first);
+					r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+				}
 			}
 		} break;
 
@@ -3853,6 +4032,11 @@ RendererCanvasRenderRD::Batch *RendererCanvasRenderRD::_new_batch(bool &r_batch_
 	Batch new_batch = state.canvas_instance_batches[state.current_batch_index];
 	new_batch.instance_count = 0;
 	new_batch.use_masks = false;
+	// Grid runs belong to the batch that recorded them.
+	new_batch.use_grid = false;
+	new_batch.last_grid_kind = 0;
+	new_batch.grid_runs_start = state.grid_runs.size();
+	new_batch.grid_runs_count = 0;
 	new_batch.start = state.instance_data_index;
 	memset(&new_batch.push_data, 0, sizeof(new_batch.push_data));
 	state.current_batch_index++;
@@ -3946,6 +4130,9 @@ RendererCanvasRenderRD::~RendererCanvasRenderRD() {
 		if (state.mask_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(state.mask_buffer);
 		}
+		if (state.deform_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(state.deform_buffer);
+		}
 		if (state.canvas_state_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(state.canvas_state_buffer);
 		}
@@ -3965,6 +4152,10 @@ RendererCanvasRenderRD::~RendererCanvasRenderRD() {
 	{
 		RD::get_singleton()->free_rid(shader.quad_index_array);
 		RD::get_singleton()->free_rid(shader.quad_index_buffer);
+		for (uint32_t grid = 0; grid < DEFORM_GRID_COUNT; grid++) {
+			RD::get_singleton()->free_rid(shader.grid_index_arrays[grid]);
+			RD::get_singleton()->free_rid(shader.grid_index_buffers[grid]);
+		}
 		//primitives are erase by dependency
 	}
 

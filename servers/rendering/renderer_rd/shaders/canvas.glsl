@@ -43,18 +43,29 @@ layout(location = 2) out flat vec4 varying_A;
 layout(location = 3) out flat uvec4 varying_B;
 layout(location = 4) out flat uvec4 varying_C;
 #if defined(USE_MASKS) && !defined(USE_PAGE_RECT)
-layout(location = 9) out flat uint varying_item_data;
+// Item data and the follow codes of the mask slots.
+layout(location = 9) out flat uvec2 varying_item_data;
 #endif
 
 #ifdef USE_PAGE_RECT
 layout(location = 5) out flat vec4 varying_D;
 layout(location = 6) out flat vec4 varying_E;
-layout(location = 7) out flat uint varying_F;
+layout(location = 7) out flat uvec2 varying_F;
 #elif defined(USE_NINEPATCH)
 layout(location = 5) out flat vec4 varying_D;
 layout(location = 6) out flat vec4 varying_E;
 layout(location = 7) out flat vec4 varying_F;
 layout(location = 8) out vec2 pixel_size_interp;
+#endif
+#if defined(USE_MASKS) && !defined(USE_NINEPATCH) && !defined(USE_PRIMITIVE)
+// Screen places of the point after none and one (deform_rest_interp) and two and three (deform_rest_far_interp) records
+// of its chain, where masks that follow the bend are sampled; nine-patches, which never bend, use location 8.
+layout(location = 8) out vec4 deform_rest_interp;
+#ifdef USE_PAGE_RECT
+layout(location = 9) out vec4 deform_rest_far_interp;
+#else
+layout(location = 5) out vec4 deform_rest_far_interp;
+#endif
 #endif
 #endif
 
@@ -113,6 +124,7 @@ layout(location = 15) in uvec4 attrib_H;
 #define read_draw_data_dst_rect attrib_E
 #define read_draw_data_src_rect attrib_F
 #define read_draw_data_item_data attrib_G.x
+#define read_draw_data_deform attrib_G.y
 #define read_draw_data_array_layer (read_draw_data_item_data & 0x7FFu)
 #define read_draw_data_max_region_lod ((read_draw_data_item_data >> 11u) & 0x1Fu)
 
@@ -134,6 +146,387 @@ layout(set = 1, binding = 0, std140) uniform MaterialUniforms {
 
 #GLOBALS
 
+#if !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE) && !defined(USE_NINEPATCH)
+vec2 deform_warp_point(uint p_base, uint p_index) {
+	vec4 row = deform_data.rows[p_base + p_index / 2u];
+	return (p_index & 1u) != 0u ? row.zw : row.xy;
+}
+
+// One record moves p_point (owner space). Weights come from the straight position p_rest; joints apply from the tip.
+vec2 deform_apply_record(uint p_offset, vec2 p_point, vec2 p_rest) {
+	vec4 counts = deform_data.rows[p_offset + 1u];
+	vec4 warp_info = deform_data.rows[p_offset + 2u];
+	uint joints = uint(counts.z);
+	uint warp_columns = uint(counts.w);
+	uint warp_rows = uint(warp_info.x);
+	vec2 point = p_point;
+	if (warp_columns >= 2u && warp_rows >= 2u) {
+		vec4 rect = deform_data.rows[p_offset + 3u];
+		vec2 unit = (p_rest - rect.xy) / rect.zw;
+		// Grid points on the rectangle's edges count as inside, so rounding cannot drop the edge points.
+		float inside = (all(greaterThanEqual(unit, vec2(-1.0e-4))) && all(lessThanEqual(unit, vec2(1.0 + 1.0e-4)))) ? 1.0 : 0.0;
+		vec2 cell = clamp(unit, vec2(0.0), vec2(1.0)) * vec2(float(warp_columns - 1u), float(warp_rows - 1u));
+		uvec2 corner = min(uvec2(cell), uvec2(warp_columns - 2u, warp_rows - 2u));
+		vec2 fraction = cell - vec2(corner);
+		uint base = p_offset + 4u + joints * 2u;
+		uint index = corner.y * warp_columns + corner.x;
+		vec2 top = mix(deform_warp_point(base, index), deform_warp_point(base, index + 1u), fraction.x);
+		vec2 bottom = mix(deform_warp_point(base, index + warp_columns), deform_warp_point(base, index + warp_columns + 1u), fraction.x);
+		point += inside * warp_info.y * mix(top, bottom, fraction.y);
+	}
+	for (int joint = int(joints) - 1; joint >= 0; joint--) {
+		vec4 a = deform_data.rows[p_offset + 4u + uint(joint) * 2u];
+		vec4 b = deform_data.rows[p_offset + 5u + uint(joint) * 2u];
+		vec2 pivot = a.xy;
+		vec2 axis = a.zw;
+		float along = dot(p_rest - pivot, axis);
+		float blend = max(b.y, 0.001);
+		float weight = smoothstep(-blend, blend, along);
+		if (b.z != 1.0) {
+			float segment = b.w > 0.0 ? b.w : 1.0e9;
+			point += axis * (clamp(along, 0.0, segment) * (b.z - 1.0));
+		}
+		float angle = b.x * weight;
+		float c = cos(angle);
+		float s = sin(angle);
+		vec2 d = point - pivot;
+		point = pivot + vec2(c * d.x - s * d.y, s * d.x + c * d.y);
+	}
+	return point;
+}
+
+// True when the grid's long lines run along the picture's x: the turning joints that cross the rectangle [p_lo, p_hi]
+// with an axis along x turn by more in total than those with an axis along y.
+bool deform_bands_across(uint p_chain, vec2 p_lo, vec2 p_hi, mat2 p_item_basis, vec2 p_item_ofs) {
+	uvec4 records = floatBitsToUint(deform_data.rows[p_chain]) & uvec4(DEFORM_RECORD_MASK);
+	mat2 to_item_basis = inverse(p_item_basis);
+	float turn_x = 0.0;
+	float turn_y = 0.0;
+	for (uint level = 0u; level < 4u; level++) {
+		if (records[level] == 0u) {
+			break;
+		}
+		uint offset = canvas_data.deform_record_base + records[level] - 1u;
+		vec4 basis = deform_data.rows[offset];
+		vec4 counts = deform_data.rows[offset + 1u];
+		mat2 to_item = to_item_basis * mat2(basis.xy, basis.zw);
+		vec2 to_item_ofs = to_item_basis * (counts.xy - p_item_ofs);
+		uint joints = min(uint(counts.z), DEFORM_BAND_JOINTS);
+		for (uint joint = 0u; joint < joints; joint++) {
+			vec4 b = deform_data.rows[offset + 5u + joint * 2u];
+			if (b.x == 0.0) {
+				continue;
+			}
+			vec4 a = deform_data.rows[offset + 4u + joint * 2u];
+			vec2 axis = to_item * a.zw;
+			vec2 pivot = to_item * a.xy + to_item_ofs;
+			float axis_length = length(axis);
+			float half_width = max(b.y, 0.5) * axis_length;
+			if (abs(axis.x) >= 0.85 * axis_length && pivot.x + half_width > p_lo.x && pivot.x - half_width < p_hi.x) {
+				turn_x += abs(b.x);
+			} else if (abs(axis.y) >= 0.85 * axis_length && pivot.y + half_width > p_lo.y && pivot.y - half_width < p_hi.y) {
+				turn_y += abs(b.x);
+			}
+		}
+	}
+	return turn_x > turn_y;
+}
+
+// The long grid lines gather in the turning joint bands of every record of the chain whose axis runs along them, at
+// equal weight steps (so a fold turns by equal angles from line to line); the rest of the lines spread evenly. p_v is
+// a place along the picture's y, or along its x when p_across is true.
+#define DEFORM_ROW_DENSITY 24.0
+float deform_band_row(float p_u, vec2 p_band, vec2 p_shape) {
+	float h = max(p_shape.y, 1.0e-3);
+	float w0 = smoothstep(0.0, 1.0, (p_band.x - p_shape.x + h) / (2.0 * h));
+	float w1 = smoothstep(0.0, 1.0, (p_band.y - p_shape.x + h) / (2.0 * h));
+	float w = mix(w0, w1, clamp((p_u - p_band.x) / max(p_band.y - p_band.x, 1.0e-6), 0.0, 1.0));
+	float t = 0.5 - sin(asin(clamp(1.0 - 2.0 * w, -1.0, 1.0)) / 3.0);
+	return clamp(p_shape.x - h + 2.0 * h * t, p_band.x, p_band.y);
+}
+
+float deform_adapt_line(uint p_chain, float p_y, float p_y0, float p_y1, bool p_across, mat2 p_item_basis, vec2 p_item_ofs) {
+	uvec4 records = floatBitsToUint(deform_data.rows[p_chain]) & uvec4(DEFORM_RECORD_MASK);
+	vec2 bands[DEFORM_BAND_JOINTS];
+	vec2 shapes[DEFORM_BAND_JOINTS];
+	uint band_count = 0u;
+	mat2 to_item_basis = inverse(p_item_basis);
+	for (uint level = 0u; level < 4u; level++) {
+		if (records[level] == 0u) {
+			break;
+		}
+		uint offset = canvas_data.deform_record_base + records[level] - 1u;
+		vec4 basis = deform_data.rows[offset];
+		vec4 counts = deform_data.rows[offset + 1u];
+		mat2 to_item = to_item_basis * mat2(basis.xy, basis.zw);
+		vec2 to_item_ofs = to_item_basis * (counts.xy - p_item_ofs);
+		uint joints = min(uint(counts.z), DEFORM_BAND_JOINTS);
+		for (uint joint = 0u; joint < joints && band_count < DEFORM_BAND_JOINTS; joint++) {
+			vec4 a = deform_data.rows[offset + 4u + joint * 2u];
+			vec4 b = deform_data.rows[offset + 5u + joint * 2u];
+			if (b.x == 0.0) {
+				continue;
+			}
+			vec2 axis = to_item * a.zw;
+			vec2 pivot = to_item * a.xy + to_item_ofs;
+			if (p_across) {
+				axis = axis.yx;
+				pivot = pivot.yx;
+			}
+			float axis_length = length(axis);
+			if (axis_length <= 0.0 || abs(axis.y) < 0.85 * axis_length) {
+				continue;
+			}
+			float centre = pivot.y;
+			float half_width = max(b.y, 0.5) * axis_length;
+			vec2 band = vec2(max(centre - half_width - 1.0, p_y0), min(centre + half_width + 1.0, p_y1));
+			if (band.y <= band.x) {
+				continue;
+			}
+			uint at = band_count;
+			while (at > 0u && bands[at - 1u].x > band.x) {
+				bands[at] = bands[at - 1u];
+				shapes[at] = shapes[at - 1u];
+				at--;
+			}
+			bands[at] = band;
+			shapes[at] = vec2(centre, half_width);
+			band_count++;
+		}
+	}
+	if (band_count == 0u) {
+		return p_y;
+	}
+	if (band_count == 1u) {
+		vec2 band = bands[0];
+		float total = p_y1 - p_y0 + (DEFORM_ROW_DENSITY - 1.0) * (band.y - band.x);
+		float target = (p_y - p_y0) / max(p_y1 - p_y0, 1.0e-6) * total;
+		float gap = band.x - p_y0;
+		if (gap >= target) {
+			return p_y0 + target;
+		}
+		float dense = (band.y - band.x) * DEFORM_ROW_DENSITY;
+		if (gap + dense >= target) {
+			return deform_band_row(band.x + (target - gap) / DEFORM_ROW_DENSITY, band, shapes[0]);
+		}
+		return min(band.y + (target - (gap + dense)), p_y1);
+	}
+	float total = p_y1 - p_y0;
+	float cursor = p_y0;
+	for (uint i = 0u; i < band_count; i++) {
+		vec2 band = vec2(max(bands[i].x, cursor), bands[i].y);
+		if (band.y > band.x) {
+			total += (DEFORM_ROW_DENSITY - 1.0) * (band.y - band.x);
+			cursor = band.y;
+		}
+	}
+	float target = (p_y - p_y0) / max(p_y1 - p_y0, 1.0e-6) * total;
+	float accumulated = 0.0;
+	cursor = p_y0;
+	for (uint i = 0u; i < band_count; i++) {
+		vec2 band = vec2(max(bands[i].x, cursor), bands[i].y);
+		if (band.y <= band.x) {
+			continue;
+		}
+		float gap = band.x - cursor;
+		if (accumulated + gap >= target) {
+			return cursor + (target - accumulated);
+		}
+		accumulated += gap;
+		float dense = (band.y - band.x) * DEFORM_ROW_DENSITY;
+		if (accumulated + dense >= target) {
+			return deform_band_row(band.x + (target - accumulated) / DEFORM_ROW_DENSITY, band, shapes[i]);
+		}
+		accumulated += dense;
+		cursor = band.y;
+	}
+	return min(cursor + (target - accumulated), p_y1);
+}
+
+// Weight of the grid lines from p_lo up to p_y: joint bands count DEFORM_ROW_DENSITY times. Bands are sorted and apart.
+float deform_line_mass(float p_y, float p_lo, vec2 p_bands[DEFORM_BAND_JOINTS], uint p_band_count) {
+	float mass = p_y - p_lo;
+	for (uint i = 0u; i < p_band_count; i++) {
+		mass += (DEFORM_ROW_DENSITY - 1.0) * max(min(p_y, p_bands[i].y) - p_bands[i].x, 0.0);
+	}
+	return mass;
+}
+
+// The place whose deform_line_mass() is p_mass.
+float deform_line_at(float p_mass, float p_lo, vec2 p_bands[DEFORM_BAND_JOINTS], uint p_band_count) {
+	float cursor = p_lo;
+	float mass = 0.0;
+	for (uint i = 0u; i < p_band_count; i++) {
+		float gap = p_bands[i].x - cursor;
+		if (mass + gap >= p_mass) {
+			return cursor + (p_mass - mass);
+		}
+		mass += gap;
+		float dense = (p_bands[i].y - p_bands[i].x) * DEFORM_ROW_DENSITY;
+		if (mass + dense >= p_mass) {
+			return p_bands[i].x + (p_mass - mass) / DEFORM_ROW_DENSITY;
+		}
+		mass += dense;
+		cursor = p_bands[i].y;
+	}
+	return cursor + (p_mass - mass);
+}
+
+// Warp grids: place of grid line p_index of p_count along one item axis (0 x, 1 y) of the rectangle [p_lo, p_hi].
+// Every grid line of the innermost warp of the chain that crosses the rectangle on this axis is a line of the grid, so
+// every warp point moves the picture; the other lines spread over the gaps, denser in the joint bands across this axis.
+// A warp turned against the item has no lines along its axes; its grid lines then only spread.
+float deform_warp_line(uint p_chain, uint p_axis, uint p_index, uint p_count, float p_lo, float p_hi, mat2 p_item_basis, vec2 p_item_ofs) {
+	uvec4 records = floatBitsToUint(deform_data.rows[p_chain]) & uvec4(DEFORM_RECORD_MASK);
+	mat2 to_item_basis = inverse(p_item_basis);
+	vec2 bands[DEFORM_BAND_JOINTS];
+	uint band_count = 0u;
+	float line_first = 0.0;
+	float line_step = 0.0;
+	uint line_count = 0u;
+	for (uint level = 0u; level < 4u; level++) {
+		if (records[level] == 0u) {
+			break;
+		}
+		uint offset = canvas_data.deform_record_base + records[level] - 1u;
+		vec4 basis = deform_data.rows[offset];
+		vec4 counts = deform_data.rows[offset + 1u];
+		mat2 to_item = to_item_basis * mat2(basis.xy, basis.zw);
+		vec2 to_item_ofs = to_item_basis * (counts.xy - p_item_ofs);
+		uint joints = min(uint(counts.z), DEFORM_BAND_JOINTS);
+		for (uint joint = 0u; joint < joints && band_count < DEFORM_BAND_JOINTS; joint++) {
+			vec4 a = deform_data.rows[offset + 4u + joint * 2u];
+			vec4 b = deform_data.rows[offset + 5u + joint * 2u];
+			if (b.x == 0.0) {
+				continue;
+			}
+			vec2 axis = to_item * a.zw;
+			float axis_length = length(axis);
+			if (axis_length <= 0.0 || abs(axis[p_axis]) < 0.85 * axis_length) {
+				continue;
+			}
+			vec2 pivot = to_item * a.xy + to_item_ofs;
+			float centre = pivot[p_axis];
+			float half_width = max(b.y, 0.5) * axis_length;
+			vec2 band = vec2(max(centre - half_width - 1.0, p_lo), min(centre + half_width + 1.0, p_hi));
+			if (band.y <= band.x) {
+				continue;
+			}
+			uint at = band_count;
+			while (at > 0u && bands[at - 1u].x > band.x) {
+				bands[at] = bands[at - 1u];
+				at--;
+			}
+			bands[at] = band;
+			band_count++;
+		}
+		uint warp_columns = uint(counts.w);
+		uint warp_rows = uint(deform_data.rows[offset + 2u].x);
+		if (line_count != 0u || warp_columns < 2u || warp_rows < 2u) {
+			continue;
+		}
+		// The owner axis that runs along this item axis: its warp lines are lines across this axis.
+		uint other = 1u - p_axis;
+		vec2 rect_start = deform_data.rows[offset + 3u].xy;
+		vec2 rect_size = deform_data.rows[offset + 3u].zw;
+		uint owner_axis = 2u;
+		if (abs(to_item[0][other]) <= 1.0e-3 * abs(to_item[0][p_axis]) && abs(to_item[1][p_axis]) <= 1.0e-3 * abs(to_item[1][other])) {
+			owner_axis = 0u;
+		} else if (abs(to_item[1][other]) <= 1.0e-3 * abs(to_item[1][p_axis]) && abs(to_item[0][p_axis]) <= 1.0e-3 * abs(to_item[0][other])) {
+			owner_axis = 1u;
+		}
+		if (owner_axis == 2u) {
+			continue;
+		}
+		uint points = owner_axis == 0u ? warp_columns : warp_rows;
+		float scale = to_item[owner_axis][p_axis];
+		float first = scale * rect_start[owner_axis] + to_item_ofs[p_axis];
+		float step = scale * rect_size[owner_axis] / float(points - 1u);
+		if (step < 0.0) {
+			first += step * float(points - 1u);
+			step = -step;
+		}
+		if (step <= 0.0 || first > p_hi || first + step * float(points - 1u) < p_lo) {
+			continue;
+		}
+		line_first = first;
+		line_step = step;
+		line_count = points;
+	}
+	// Overlapping bands become one.
+	uint merged = 0u;
+	for (uint i = 0u; i < band_count; i++) {
+		if (merged > 0u && bands[i].x <= bands[merged - 1u].y) {
+			bands[merged - 1u].y = max(bands[merged - 1u].y, bands[i].y);
+		} else {
+			bands[merged] = bands[i];
+			merged++;
+		}
+	}
+	// Warp lines strictly inside the rectangle split it into intervals; each interval gets one grid line, and the
+	// spare lines go to the intervals by their weight.
+	uint first_line = 0u;
+	uint inner = 0u;
+	if (line_count != 0u) {
+		float margin = 1.0e-3 * line_step;
+		float lowest = max(floor((p_lo + margin - line_first) / line_step) + 1.0, 0.0);
+		float highest = min(ceil((p_hi - margin - line_first) / line_step) - 1.0, float(line_count - 1u));
+		if (highest >= lowest) {
+			first_line = uint(lowest);
+			inner = uint(highest - lowest) + 1u;
+		}
+	}
+	if (inner + 1u > p_count) {
+		inner = 0u;
+	}
+	uint intervals = inner + 1u;
+	float total = max(deform_line_mass(p_hi, p_lo, bands, merged), 1.0e-6);
+	float spare = float(p_count - intervals);
+	uint start = 0u;
+	float lo = p_lo;
+	float lo_mass = 0.0;
+	for (uint interval = 0u; interval < intervals; interval++) {
+		float hi = interval + 1u < intervals ? line_first + float(first_line + interval) * line_step : p_hi;
+		float hi_mass = deform_line_mass(hi, p_lo, bands, merged);
+		uint lines = 1u + uint(floor(spare * (hi_mass - lo_mass) / total));
+		if (p_index < start + lines) {
+			uint sub = p_index - start;
+			if (sub == 0u) {
+				return lo;
+			}
+			return deform_line_at(mix(lo_mass, hi_mass, float(sub) / float(lines)), p_lo, bands, merged);
+		}
+		start += lines;
+		lo = hi;
+		lo_mass = hi_mass;
+	}
+	return p_hi;
+}
+
+// Moves a rectangle vertex (item space) by the records of its chain, innermost first, in canvas space. r_moved[n] is
+// the canvas-space place after the first n records, or after all of them when the chain is shorter.
+vec2 deform_vertex(uint p_chain, vec2 p_vertex, vec2 p_world_x, vec2 p_world_y, vec2 p_world_ofs, out vec2 r_moved[4]) {
+	uvec4 records = floatBitsToUint(deform_data.rows[p_chain]) & uvec4(DEFORM_RECORD_MASK);
+	mat2 item_basis = mat2(p_world_x, p_world_y);
+	vec2 world = item_basis * p_vertex + p_world_ofs;
+	vec2 rest_world = world;
+	for (uint level = 0u; level < 4u; level++) {
+		r_moved[level] = world;
+		uint record = records[level];
+		if (record == 0u) {
+			continue;
+		}
+		uint offset = canvas_data.deform_record_base + record - 1u;
+		vec4 basis = deform_data.rows[offset];
+		vec2 origin = deform_data.rows[offset + 1u].xy;
+		mat2 owner_basis = mat2(basis.xy, basis.zw);
+		mat2 to_owner = inverse(owner_basis);
+		world = owner_basis * deform_apply_record(offset, to_owner * (world - origin), to_owner * (rest_world - origin)) + origin;
+	}
+	return inverse(item_basis) * (world - p_world_ofs);
+}
+#endif
+
 #ifdef USE_ATTRIBUTES
 vec3 srgb_to_linear(vec3 color) {
 	return mix(pow((color.rgb + vec3(0.055)) * (1.0 / (1.0 + 0.055)), vec3(2.4)), color.rgb * (1.0 / 12.92), lessThan(color.rgb, vec3(0.04045)));
@@ -150,12 +543,12 @@ void main() {
 #endif
 	varying_C = read_draw_data_lights;
 #if defined(USE_MASKS) && !defined(USE_PAGE_RECT)
-	varying_item_data = read_draw_data_item_data;
+	varying_item_data = uvec2(read_draw_data_item_data, 0u);
 #endif
 #ifdef USE_PAGE_RECT
 	varying_D = read_draw_data_src_rect;
 	varying_E = read_draw_data_ninepatch_margins;
-	varying_F = read_draw_data_item_data;
+	varying_F = uvec2(read_draw_data_item_data, 0u);
 #elif defined(USE_NINEPATCH)
 	varying_D = read_draw_data_ninepatch_margins;
 	varying_E = vec4(read_draw_data_dst_rect.z, read_draw_data_dst_rect.w, read_draw_data_ninepatch_pixel_size.x, read_draw_data_ninepatch_pixel_size.y);
@@ -219,12 +612,58 @@ void main() {
 #else
 
 	vec2 vertex_base_arr[4] = vec2[](vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(1.0, 0.0));
+#ifdef USE_NINEPATCH
 	vec2 vertex_base = vertex_base_arr[gl_VertexIndex];
+#else
+	uint deform_word = sc_use_deform() ? read_draw_data_deform : 0u;
+	vec2 vertex_base;
+	bool warp_grid = sc_use_deform() && bool(params.batch_flags & BATCH_FLAGS_DEFORM_WARP);
+	uvec4 grid = uvec4(0u);
+	if (sc_use_deform() && bool(params.batch_flags & BATCH_FLAGS_DEFORM_GRID)) {
+		// grid: column, row, columns, rows.
+		grid.z = warp_grid ? DEFORM_WARP_GRID_COLUMNS : DEFORM_GRID_COLUMNS;
+		grid.w = warp_grid ? DEFORM_WARP_GRID_ROWS : (bool(params.batch_flags & BATCH_FLAGS_DEFORM_DENSE) ? DEFORM_DENSE_GRID_ROWS : DEFORM_GRID_ROWS);
+		grid.x = uint(gl_VertexIndex) % (grid.z + 1u);
+		grid.y = uint(gl_VertexIndex) / (grid.z + 1u);
+
+		vertex_base = vec2(grid.xy) / vec2(grid.zw);
+	} else {
+		vertex_base = vertex_base_arr[gl_VertexIndex];
+	}
+#endif
 
 	vec2 uv = read_draw_data_src_rect.xy + abs(read_draw_data_src_rect.zw) * ((read_draw_data_flags & INSTANCE_FLAGS_TRANSPOSE_RECT) != 0 ? vertex_base.yx : vertex_base.xy);
 	vec4 color = read_draw_data_modulation;
 	vec2 vertex = read_draw_data_dst_rect.xy + abs(read_draw_data_dst_rect.zw) * mix(vertex_base, vec2(1.0, 1.0) - vertex_base, lessThan(read_draw_data_src_rect.zw, vec2(0.0, 0.0)));
 	uvec4 bones = uvec4(0, 0, 0, 0);
+#ifndef USE_NINEPATCH
+	uint deform_chain = deform_word & DEFORM_CHAIN_MASK;
+	vec2 deform_moved[4];
+	if (deform_chain != 0u) {
+		vec2 lo = read_draw_data_dst_rect.xy;
+		vec2 hi = lo + abs(read_draw_data_dst_rect.zw);
+		mat2 item_basis = mat2(read_draw_data_world_x, read_draw_data_world_y);
+		bool joint_grid = !warp_grid && bool(params.batch_flags & BATCH_FLAGS_DEFORM_GRID);
+		if (warp_grid) {
+			vertex.x = deform_warp_line(deform_chain, 0u, grid.x, grid.z, lo.x, hi.x, item_basis, read_draw_data_world_ofs);
+			vertex.y = deform_warp_line(deform_chain, 1u, grid.y, grid.w, lo.y, hi.y, item_basis, read_draw_data_world_ofs);
+		} else if (joint_grid) {
+			// The long lines of the grid run along the picture's x when the turning joints run that way, else along y.
+			if (deform_bands_across(deform_chain, lo, hi, item_basis, read_draw_data_world_ofs)) {
+				vertex = lo + (hi - lo) * mix(vertex_base.yx, vec2(1.0) - vertex_base.yx, lessThan(read_draw_data_src_rect.zw, vec2(0.0)));
+				vertex.x = deform_adapt_line(deform_chain, vertex.x, lo.x, hi.x, true, item_basis, read_draw_data_world_ofs);
+			} else {
+				vertex.y = deform_adapt_line(deform_chain, vertex.y, lo.y, hi.y, false, item_basis, read_draw_data_world_ofs);
+			}
+		}
+		if (warp_grid || joint_grid) {
+			vec2 unit = (vertex - lo) / max(hi - lo, vec2(1.0e-6));
+			vertex_base = mix(unit, vec2(1.0) - unit, lessThan(read_draw_data_src_rect.zw, vec2(0.0)));
+			uv = read_draw_data_src_rect.xy + abs(read_draw_data_src_rect.zw) * ((read_draw_data_flags & INSTANCE_FLAGS_TRANSPOSE_RECT) != 0 ? vertex_base.yx : vertex_base.xy);
+		}
+		vertex = deform_vertex(deform_chain, vertex, read_draw_data_world_x, read_draw_data_world_y, read_draw_data_world_ofs, deform_moved);
+	}
+#endif
 
 #endif
 
@@ -323,6 +762,34 @@ void main() {
 	uv_vertex_interp = vec4(uv, vertex);
 
 #ifdef USE_MASKS
+	vec2 mask_vertex_0 = vertex;
+	vec2 mask_vertex_1 = vertex;
+#if !defined(USE_NINEPATCH) && !defined(USE_PRIMITIVE) && !defined(USE_ATTRIBUTES)
+	// Follow code of each mask slot, three bits each: 0 stays, 1 + n samples where the first n records moved the point.
+	uint follow_codes = 0u;
+	vec2 follow_places[4] = vec2[](vertex, vertex, vertex, vertex);
+	if (deform_chain != 0u) {
+		uvec4 code_bytes = floatBitsToUint(deform_data.rows[deform_chain]) >> DEFORM_FOLLOW_CODE_SHIFT;
+		follow_codes = code_bytes.x | (code_bytes.y << 6u) | (code_bytes.z << 12u) | (code_bytes.w << 18u);
+	}
+	if (follow_codes != 0u) {
+		for (uint level = 0u; level < 4u; level++) {
+			vec2 place = (canvas_data.canvas_transform * vec4(deform_moved[level], 0.0, 1.0)).xy;
+			follow_places[level] = canvas_data.use_pixel_snap ? floor(place + 0.5) : place;
+		}
+		uint code_0 = follow_codes & 7u;
+		uint code_1 = (follow_codes >> 3u) & 7u;
+		mask_vertex_0 = code_0 != 0u ? follow_places[code_0 - 1u] : vertex;
+		mask_vertex_1 = code_1 != 0u ? follow_places[code_1 - 1u] : vertex;
+	}
+	deform_rest_interp = vec4(follow_places[0], follow_places[1]);
+	deform_rest_far_interp = vec4(follow_places[2], follow_places[3]);
+#ifdef USE_PAGE_RECT
+	varying_F.y = follow_codes;
+#else
+	varying_item_data.y = follow_codes;
+#endif
+#endif
 	mask_uv_interp = vec4(0.0);
 #ifdef USE_DOUBLE_MASK
 	second_mask_region_interp = vec4(0.0);
@@ -354,7 +821,7 @@ void main() {
 			}
 #endif
 			vec4 extra = uintBitsToFloat(mask_data.rows[base + 3u]);
-			mask_uv_interp.xy = vec2(dot(row_x.xyz, vec3(vertex, 1.0)), dot(row_y.xyz, vec3(vertex, 1.0)));
+			mask_uv_interp.xy = vec2(dot(row_x.xyz, vec3(mask_vertex_0, 1.0)), dot(row_y.xyz, vec3(mask_vertex_0, 1.0)));
 			mask_region_interp = uintBitsToFloat(mask_data.rows[base + 2u]);
 			mask_extra_interp = vec4(min(extra.yz * exp2(ceil(sc_mask_mipmaps() ? row_y.w : 0.0)), vec2(0.5)), row_y.w, extra.x * 4.0 + row_x.w * 2.0 + extra.w);
 		}
@@ -372,7 +839,7 @@ void main() {
 			}
 #endif
 			vec4 extra = uintBitsToFloat(mask_data.rows[base + 3u]);
-			mask_uv_interp.zw = sc_mask_same_uv() ? mask_uv_interp.xy : vec2(dot(row_x.xyz, vec3(vertex, 1.0)), dot(row_y.xyz, vec3(vertex, 1.0)));
+			mask_uv_interp.zw = sc_mask_same_uv() ? mask_uv_interp.xy : vec2(dot(row_x.xyz, vec3(mask_vertex_1, 1.0)), dot(row_y.xyz, vec3(mask_vertex_1, 1.0)));
 			second_mask_region_interp = uintBitsToFloat(mask_data.rows[base + 2u]);
 			second_mask_extra_interp = vec4(min(extra.yz * exp2(ceil(sc_mask_mipmaps() ? row_y.w : 0.0)), vec2(0.5)), row_y.w, extra.x * 4.0 + row_x.w * 2.0 + extra.w);
 			if (bool(read_draw_data_flags & INSTANCE_FLAGS_MASK_REVERSE)) {
@@ -415,6 +882,14 @@ layout(location = 12) in flat vec4 mask_extra_interp;
 layout(location = 13) in flat vec4 second_mask_region_interp;
 layout(location = 14) in flat vec4 second_mask_extra_interp;
 #endif
+#if !defined(USE_ATTRIBUTES) && !defined(USE_NINEPATCH) && !defined(USE_PRIMITIVE)
+layout(location = 8) in vec4 deform_rest_interp;
+#ifdef USE_PAGE_RECT
+layout(location = 9) in vec4 deform_rest_far_interp;
+#else
+layout(location = 5) in vec4 deform_rest_far_interp;
+#endif
+#endif
 #endif
 
 #define read_draw_data_color_texture_pixel_size params.color_texture_pixel_size
@@ -438,8 +913,9 @@ layout(location = 2) in flat vec4 varying_A;
 layout(location = 3) in flat uvec4 varying_B;
 layout(location = 4) in flat uvec4 varying_C;
 #if defined(USE_MASKS) && !defined(USE_PAGE_RECT)
-layout(location = 9) in flat uint varying_item_data;
-#define read_draw_data_item_data varying_item_data
+layout(location = 9) in flat uvec2 varying_item_data;
+#define read_draw_data_item_data varying_item_data.x
+#define read_draw_data_follow_codes varying_item_data.y
 #endif
 #define read_draw_data_flags varying_B.x
 #define read_draw_data_instance_offset varying_B.y
@@ -449,10 +925,11 @@ layout(location = 9) in flat uint varying_item_data;
 #ifdef USE_PAGE_RECT
 layout(location = 5) in flat vec4 varying_D;
 layout(location = 6) in flat vec4 varying_E;
-layout(location = 7) in flat uint varying_F;
+layout(location = 7) in flat uvec2 varying_F;
 #define read_draw_data_page_source varying_D
 #define read_draw_data_sampler_domain varying_E
-#define read_draw_data_item_data varying_F
+#define read_draw_data_item_data varying_F.x
+#define read_draw_data_follow_codes varying_F.y
 #define read_draw_data_array_layer (read_draw_data_item_data & 0x7FFu)
 #define read_draw_data_max_region_lod ((read_draw_data_item_data >> 11u) & 0x1Fu)
 #elif defined(USE_NINEPATCH)
@@ -773,7 +1250,7 @@ float sample_mask(vec2 p_uv, vec4 p_region, vec2 p_margin, float p_layer, float 
 }
 
 #ifndef USE_FAST_MASK
-float sample_mask_entry(uint p_entry) {
+float sample_mask_entry(uint p_entry, uint p_slot) {
 	if (p_entry == 0u) {
 		return 1.0;
 	}
@@ -786,6 +1263,13 @@ float sample_mask_entry(uint p_entry) {
 	vec4 row_y = uintBitsToFloat(mask_data.rows[base + 1u]);
 	vec4 region = uintBitsToFloat(mask_data.rows[base + 2u]);
 	vec3 position = vec3(uv_vertex_interp.zw, 1.0);
+#if !defined(USE_ATTRIBUTES) && !defined(USE_NINEPATCH) && !defined(USE_PRIMITIVE)
+	uint code = sc_use_deform() ? (read_draw_data_follow_codes >> (p_slot * 3u)) & 7u : 0u;
+	if (code != 0u) {
+		vec4 places = code < 3u ? deform_rest_interp : deform_rest_far_interp;
+		position.xy = (code & 1u) != 0u ? places.xy : places.zw;
+	}
+#endif
 	vec2 mask_uv = vec2(dot(row_x.xyz, position), dot(row_y.xyz, position));
 	vec2 margin = min(extra.yz * exp2(ceil(sc_mask_mipmaps() ? row_y.w : 0.0)), vec2(0.5));
 	return sample_mask(mask_uv, region, margin, extra.x, row_y.w, row_x.w);
@@ -807,14 +1291,14 @@ float rectangle_mask_coverage() {
 #ifndef USE_FAST_MASK
 		} else {
 			uvec4 indices = mask_data.rows[mask_set];
-			coverage *= sample_mask_entry(indices.x & 0xFFFFu);
-			coverage *= sample_mask_entry(indices.x >> 16u);
-			coverage *= sample_mask_entry(indices.y & 0xFFFFu);
-			coverage *= sample_mask_entry(indices.y >> 16u);
-			coverage *= sample_mask_entry(indices.z & 0xFFFFu);
-			coverage *= sample_mask_entry(indices.z >> 16u);
-			coverage *= sample_mask_entry(indices.w & 0xFFFFu);
-			coverage *= sample_mask_entry(indices.w >> 16u);
+			coverage *= sample_mask_entry(indices.x & 0xFFFFu, 0u);
+			coverage *= sample_mask_entry(indices.x >> 16u, 1u);
+			coverage *= sample_mask_entry(indices.y & 0xFFFFu, 2u);
+			coverage *= sample_mask_entry(indices.y >> 16u, 3u);
+			coverage *= sample_mask_entry(indices.z & 0xFFFFu, 4u);
+			coverage *= sample_mask_entry(indices.z >> 16u, 5u);
+			coverage *= sample_mask_entry(indices.w & 0xFFFFu, 6u);
+			coverage *= sample_mask_entry(indices.w >> 16u, 7u);
 #endif
 		}
 #ifdef USE_DOUBLE_MASK
@@ -883,6 +1367,27 @@ float uniform_mask_coverage() {
 		}
 	}
 	return coverage;
+}
+#endif
+
+#if !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE) && !defined(USE_NINEPATCH)
+// Canvas-space directions of the picture's local axes at this pixel of a bent grid: screen-space derivatives of the
+// texture coordinate and of the position give how the picture is turned here.
+mat2 deform_local_axes(vec4 p_src_rect, mat2 p_item_axes) {
+	mat2 uv_derivatives = mat2(dFdx(uv_vertex_interp.xy), dFdy(uv_vertex_interp.xy));
+	mat2 position_derivatives = mat2(dFdx(uv_vertex_interp.zw), dFdy(uv_vertex_interp.zw));
+	mat2 canvas_basis = mat2(canvas_data.canvas_transform[0].xy, canvas_data.canvas_transform[1].xy);
+	if (abs(determinant(uv_derivatives)) < 1.0e-20 || abs(determinant(canvas_basis)) < 1.0e-20) {
+		return p_item_axes;
+	}
+	mat2 canvas_from_uv = inverse(canvas_basis) * position_derivatives * inverse(uv_derivatives);
+	bool transposed = bool(read_draw_data_flags & INSTANCE_FLAGS_TRANSPOSE_RECT);
+	vec2 axis_x = (transposed ? canvas_from_uv[1] : canvas_from_uv[0]) * sign(p_src_rect.z);
+	vec2 axis_y = (transposed ? canvas_from_uv[0] : canvas_from_uv[1]) * sign(p_src_rect.w);
+	if (dot(axis_x, axis_x) < 1.0e-20 || dot(axis_y, axis_y) < 1.0e-20) {
+		return p_item_axes;
+	}
+	return mat2(normalize(axis_x), normalize(axis_y));
 }
 #endif
 
@@ -1046,7 +1551,13 @@ void main() {
 
 	if (normal_used) {
 		//convert by item transform
-		normal.xy = mat2(normalize(read_draw_data_world_x), normalize(read_draw_data_world_y)) * normal.xy;
+		mat2 item_axes = mat2(normalize(read_draw_data_world_x), normalize(read_draw_data_world_y));
+#if !defined(USE_ATTRIBUTES) && !defined(USE_PRIMITIVE) && !defined(USE_NINEPATCH)
+		if (sc_use_deform() && bool(params.batch_flags & BATCH_FLAGS_DEFORM_GRID)) {
+			item_axes = deform_local_axes(src_rect, item_axes);
+		}
+#endif
+		normal.xy = item_axes * normal.xy;
 		//convert by canvas transform
 		normal = normalize((canvas_data.canvas_normal_transform * vec4(normal, 0.0)).xyz);
 	}
