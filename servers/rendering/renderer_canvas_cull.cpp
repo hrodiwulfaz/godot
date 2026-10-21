@@ -1742,47 +1742,33 @@ void RendererCanvasCull::canvas_item_add_texture_rect_region(RID p_item, const R
 	}
 }
 
-void RendererCanvasCull::canvas_item_add_texture_page_rect_region(RID p_item, const Rect2 &p_rect, RID p_page_texture, const Rect2 &p_mapped_source, const Rect2 &p_sampler_domain, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, RID p_fallback_texture, const Rect2 &p_fallback_source, const Color &p_modulate, bool p_transpose, bool p_clip_uv) {
+void RendererCanvasCull::canvas_item_add_texture_page_rect_region(RID p_item, const Rect2 &p_rect, RID p_view, const Rect2 &p_source, const Color &p_modulate, bool p_transpose, bool p_clip_uv) {
 	Item *canvas_item = canvas_item_owner.get_or_null(p_item);
 	ERR_FAIL_NULL(canvas_item);
-	ERR_FAIL_COND_MSG((p_mapped_source.size.x < 0) != (p_fallback_source.size.x < 0) ||
-					(p_mapped_source.size.y < 0) != (p_fallback_source.size.y < 0),
-			"Mapped and fallback source rectangles must have matching directions.");
 
 	Item::CommandTexturePageRect *rect = canvas_item->alloc_command<Item::CommandTexturePageRect>();
 	ERR_FAIL_NULL(rect);
 	rect->modulate = p_modulate;
 	rect->rect = p_rect;
-	rect->texture = p_page_texture;
-	rect->source = p_mapped_source;
-	rect->sampler_domain = p_sampler_domain;
-	rect->array_layer = p_array_layer;
-	rect->max_region_lod = p_max_region_lod;
-	rect->expected_generation = p_expected_generation;
-	rect->fallback_texture = p_fallback_texture;
-	rect->fallback_source = p_fallback_source;
+	rect->view = p_view;
+	rect->source = p_source;
 	rect->flags = RendererCanvasRender::CANVAS_RECT_REGION | RendererCanvasRender::CANVAS_RECT_REGION_SAMPLING;
-	if (RSG::texture_storage->texture_drawable_is_layered(p_page_texture)) {
-		rect->flags |= RendererCanvasRender::CANVAS_RECT_ARRAY_LAYER;
-	}
 
 	if (p_rect.size.x < 0) {
 		rect->flags |= RendererCanvasRender::CANVAS_RECT_FLIP_H;
 		rect->rect.size.x = -rect->rect.size.x;
 	}
-	if (p_mapped_source.size.x < 0) {
+	if (p_source.size.x < 0) {
 		rect->flags ^= RendererCanvasRender::CANVAS_RECT_FLIP_H;
 		rect->source.size.x = -rect->source.size.x;
-		rect->fallback_source.size.x = -rect->fallback_source.size.x;
 	}
 	if (p_rect.size.y < 0) {
 		rect->flags |= RendererCanvasRender::CANVAS_RECT_FLIP_V;
 		rect->rect.size.y = -rect->rect.size.y;
 	}
-	if (p_mapped_source.size.y < 0) {
+	if (p_source.size.y < 0) {
 		rect->flags ^= RendererCanvasRender::CANVAS_RECT_FLIP_V;
 		rect->source.size.y = -rect->source.size.y;
-		rect->fallback_source.size.y = -rect->fallback_source.size.y;
 	}
 	if (p_transpose) {
 		rect->flags |= RendererCanvasRender::CANVAS_RECT_TRANSPOSE;
@@ -2711,6 +2697,10 @@ void RendererCanvasCull::update() {
 }
 
 bool RendererCanvasCull::free(RID p_rid) {
+	if (RSG::canvas_render->texture_page_view_owner.owns(p_rid)) {
+		RSG::canvas_render->texture_page_view_owner.free(p_rid);
+		return true;
+	}
 	if (canvas_mask_owner.owns(p_rid)) {
 		Mask *mask = canvas_mask_owner.get_or_null(p_rid);
 		if (Item *owner = canvas_item_owner.get_or_null(mask->owner)) {
@@ -2984,6 +2974,49 @@ RendererCanvasCull::~RendererCanvasCull() {
 	memfree(z_last_list);
 	_canvas_cull_singleton = nullptr;
 }
+
+RID RendererCanvasCull::canvas_texture_page_view_allocate() {
+	return RSG::canvas_render->texture_page_view_owner.allocate_rid();
+}
+
+void RendererCanvasCull::canvas_texture_page_view_initialize(RID p_rid) {
+	RSG::canvas_render->texture_page_view_owner.initialize_rid(p_rid);
+}
+
+void RendererCanvasCull::canvas_texture_page_view_set(RID p_view, RID p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, RID p_fallback_texture, const Size2i &p_logical_size, const Vector2i &p_logical_offset) {
+	RendererCanvasRender::TexturePageView *view = RSG::canvas_render->texture_page_view_owner.get_or_null(p_view);
+	ERR_FAIL_NULL(view);
+	ERR_FAIL_COND(p_physical_region.position.x < 0 || p_physical_region.position.y < 0 || p_physical_region.size.x <= 0 || p_physical_region.size.y <= 0);
+	ERR_FAIL_COND(int64_t(p_physical_region.position.x) + p_physical_region.size.x > INT32_MAX || int64_t(p_physical_region.position.y) + p_physical_region.size.y > INT32_MAX);
+	ERR_FAIL_COND(p_logical_size.x <= 0 || p_logical_size.y <= 0 || p_logical_offset.x < 0 || p_logical_offset.y < 0);
+	ERR_FAIL_COND(int64_t(p_logical_offset.x) + p_physical_region.size.x > p_logical_size.x || int64_t(p_logical_offset.y) + p_physical_region.size.y > p_logical_size.y);
+	ERR_FAIL_COND(p_array_layer >= 2048 || p_max_region_lod > 30 || p_expected_generation == 0);
+	view->page_texture = p_page_texture;
+	view->physical_region = p_physical_region;
+	view->logical_size = p_logical_size;
+	view->logical_offset = p_logical_offset;
+	view->array_layer = p_array_layer;
+	view->max_region_lod = p_max_region_lod;
+	view->expected_generation = p_expected_generation;
+	view->fallback_texture = p_fallback_texture;
+	view->serial = ++RSG::canvas_render->texture_page_view_serial;
+}
+
+void RendererCanvasCull::canvas_texture_page_view_set_fallback(RID p_view, RID p_fallback_texture, const Size2i &p_logical_size) {
+	RendererCanvasRender::TexturePageView *view = RSG::canvas_render->texture_page_view_owner.get_or_null(p_view);
+	ERR_FAIL_NULL(view);
+	ERR_FAIL_COND(p_logical_size.x <= 0 || p_logical_size.y <= 0);
+	view->page_texture = RID();
+	view->physical_region = Rect2i();
+	view->logical_size = p_logical_size;
+	view->logical_offset = Vector2i();
+	view->array_layer = 0;
+	view->max_region_lod = 0;
+	view->expected_generation = 0;
+	view->fallback_texture = p_fallback_texture;
+	view->serial = ++RSG::canvas_render->texture_page_view_serial;
+}
+
 RID RendererCanvasCull::canvas_mask_allocate() {
 	return canvas_mask_owner.allocate_rid();
 }

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/rid_owner.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -38,6 +39,73 @@ class RenderingServer;
 class RendererCanvasRender {
 public:
 	static RendererCanvasRender *singleton;
+
+	// The place of one picture on a drawable page. Page rectangles keep the view and a logical source inside the
+	// picture; the renderers resolve the view when they build batches, so moving a view moves every rectangle that
+	// shows it without recording them again. A view that was never set, that shows only its fallback, whose page is
+	// gone or whose generation does not match the page draws its fallback, or nothing without one.
+	struct TexturePageView {
+		RID page_texture;
+		Rect2i physical_region;
+		// The whole logical picture, in which rectangles take their source. The region holds the part of the picture
+		// that starts at logical_offset; the rest of the picture is transparent on the page.
+		Size2i logical_size;
+		Vector2i logical_offset;
+		uint32_t array_layer = 0;
+		uint32_t max_region_lod = 0;
+		uint64_t expected_generation = 0;
+		RID fallback_texture;
+		// New for every set of any view, 0 before the first set: keys the kept geometry checks of page rectangles.
+		uint64_t serial = 0;
+	};
+	RID_Owner<TexturePageView, true> texture_page_view_owner;
+	uint64_t texture_page_view_serial = 0;
+	// Where a page rectangle draws on the page: of p_rect, which shows p_source with the flips and the transposition of
+	// p_flags, r_rect keeps the part whose source lies in the region, and r_source is that source on the page. False
+	// when no part of the source lies in the region.
+	static _FORCE_INLINE_ bool texture_page_place_on_page(const TexturePageView &p_view, const Rect2 &p_rect, const Rect2 &p_source, uint16_t p_flags, Rect2 &r_rect, Rect2 &r_source) {
+		const Rect2 held(Vector2(p_view.logical_offset), Vector2(p_view.physical_region.size));
+		const Vector2 to_page = Vector2(p_view.physical_region.position) - Vector2(p_view.logical_offset);
+		if (held.encloses(p_source)) {
+			r_rect = p_rect;
+			r_source = Rect2(p_source.position + to_page, p_source.size);
+			return true;
+		}
+		const Rect2 clipped = held.intersection(p_source);
+		if (clipped.size.x <= 0 || clipped.size.y <= 0) {
+			return false;
+		}
+		r_source = Rect2(clipped.position + to_page, clipped.size);
+		// The kept part along the source axes, then along the rectangle as the renderers draw it: a transposed
+		// rectangle runs the source x along its y, and a flip runs a rectangle axis backwards.
+		Vector2 from = (clipped.position - p_source.position) / p_source.size;
+		Vector2 to = (clipped.get_end() - p_source.position) / p_source.size;
+		if (p_flags & CANVAS_RECT_TRANSPOSE) {
+			SWAP(from.x, from.y);
+			SWAP(to.x, to.y);
+		}
+		if (p_flags & CANVAS_RECT_FLIP_H) {
+			const real_t start = 1.0 - to.x;
+			to.x = 1.0 - from.x;
+			from.x = start;
+		}
+		if (p_flags & CANVAS_RECT_FLIP_V) {
+			const real_t start = 1.0 - to.y;
+			to.y = 1.0 - from.y;
+			from.y = start;
+		}
+		r_rect = Rect2(p_rect.position + p_rect.size * from, p_rect.size * (to - from));
+		return true;
+	}
+	// Where a logical source of a view's picture lies on its fallback of the real size p_fallback_size: the fallback is
+	// scaled to the whole logical picture.
+	static _FORCE_INLINE_ Rect2 texture_page_fallback_source(const TexturePageView &p_view, const Rect2 &p_source, const Size2i &p_fallback_size) {
+		if (p_view.logical_size.x <= 0 || p_view.logical_size.y <= 0) {
+			return Rect2();
+		}
+		const Vector2 scale = Vector2(p_fallback_size) / Vector2(p_view.logical_size);
+		return Rect2(p_source.position * scale, p_source.size * scale);
+	}
 
 	struct MaskRow {
 		uint32_t words[4];
@@ -122,7 +190,6 @@ public:
 		CANVAS_RECT_MSDF = 128,
 		CANVAS_RECT_LCD = 256,
 		CANVAS_RECT_REGION_SAMPLING = 512,
-		CANVAS_RECT_ARRAY_LAYER = 1024,
 	};
 
 	struct Light {
@@ -290,26 +357,31 @@ public:
 			}
 		};
 
+		// A rectangle of a page view: `source` is its logical source inside the view's picture.
 		struct CommandTexturePageRect : public CommandRect {
-			Rect2 sampler_domain;
-			uint32_t array_layer = 0;
-			uint32_t max_region_lod = 0;
-			uint64_t expected_generation = 0;
-			RID fallback_texture;
-			Rect2 fallback_source;
+			RID view;
 
-			bool is_geometry_valid(const Size2i &p_page_size, int p_mipmap_count) const;
-			// The geometry check depends only on the command and the page it ran against: its result is kept for the
-			// same page generation, real size and mip count. A size override that keeps the generation checks again.
+			bool is_geometry_valid(const TexturePageView &p_view, const Size2i &p_page_size, int p_mipmap_count) const;
+			// The geometry check and the place on the page depend only on the command, the view and the page they ran
+			// against: both are kept for the same view set, page generation, real size and mip count. A size override
+			// that keeps the generation checks again.
+			mutable uint64_t checked_serial = 0;
 			mutable uint64_t checked_generation = 0;
 			mutable Size2i checked_size;
 			mutable int checked_mipmaps = 0;
 			mutable bool checked_valid = false;
-			_FORCE_INLINE_ bool is_geometry_valid_cached(uint64_t p_generation, const Size2i &p_page_size, int p_mipmap_count) const {
-				if (p_generation != 0 && checked_generation == p_generation && checked_size == p_page_size && checked_mipmaps == p_mipmap_count) {
+			// After a valid check: whether part of the source lies in the view's region, and where that part draws
+			// (see texture_page_place_on_page).
+			mutable bool placed = false;
+			mutable Rect2 placed_rect;
+			mutable Rect2 placed_source;
+			_FORCE_INLINE_ bool is_geometry_valid_cached(const TexturePageView &p_view, uint64_t p_generation, const Size2i &p_page_size, int p_mipmap_count) const {
+				if (p_generation != 0 && checked_serial == p_view.serial && checked_generation == p_generation && checked_size == p_page_size && checked_mipmaps == p_mipmap_count) {
 					return checked_valid;
 				}
-				checked_valid = is_geometry_valid(p_page_size, p_mipmap_count);
+				checked_valid = is_geometry_valid(p_view, p_page_size, p_mipmap_count);
+				placed = checked_valid && texture_page_place_on_page(p_view, rect, source, flags, placed_rect, placed_source);
+				checked_serial = p_view.serial;
 				checked_generation = p_generation;
 				checked_size = p_page_size;
 				checked_mipmaps = p_mipmap_count;

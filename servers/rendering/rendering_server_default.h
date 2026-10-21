@@ -1045,6 +1045,10 @@ public:
 	FUNC2(canvas_texture_set_texture_filter, RID, RSE::CanvasItemTextureFilter)
 	FUNC2(canvas_texture_set_texture_repeat, RID, RSE::CanvasItemTextureRepeat)
 
+	FUNCRIDSPLIT(canvas_texture_page_view)
+	FUNC9(canvas_texture_page_view_set, RID, RID, const Rect2i &, uint32_t, uint32_t, uint64_t, RID, const Size2i &, const Vector2i &)
+	FUNC3(canvas_texture_page_view_set_fallback, RID, RID, const Size2i &)
+
 	FUNCRIDSPLIT(canvas_mask)
 	FUNC2(canvas_mask_set_owner, RID, RID)
 	FUNC2(canvas_mask_set_transform, RID, const Transform2D &)
@@ -1092,7 +1096,7 @@ public:
 	FUNC5(canvas_item_add_circle, RID, const Point2 &, float, const Color &, bool)
 	FUNC6(canvas_item_add_texture_rect, RID, const Rect2 &, RID, bool, const Color &, bool)
 	FUNC7(canvas_item_add_texture_rect_region, RID, const Rect2 &, RID, const Rect2 &, const Color &, bool, bool)
-	FUNC13(canvas_item_add_texture_page_rect_region, RID, const Rect2 &, RID, const Rect2 &, const Rect2 &, uint32_t, uint32_t, uint64_t, RID, const Rect2 &, const Color &, bool, bool)
+	FUNC7(canvas_item_add_texture_page_rect_region, RID, const Rect2 &, RID, const Rect2 &, const Color &, bool, bool)
 	FUNC8(canvas_item_add_msdf_texture_rect_region, RID, const Rect2 &, RID, const Rect2 &, const Color &, int, float, float)
 	FUNC5(canvas_item_add_lcd_texture_rect_region, RID, const Rect2 &, RID, const Rect2 &, const Color &)
 	FUNC10(canvas_item_add_nine_patch, RID, const Rect2 &, const Rect2 &, RID, const Vector2 &, const Vector2 &, RSE::NinePatchAxisMode, RSE::NinePatchAxisMode, bool, const Color &)

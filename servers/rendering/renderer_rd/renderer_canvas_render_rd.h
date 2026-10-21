@@ -691,11 +691,26 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 	static constexpr uint32_t PAGE_MEMO_SIZE = 4;
 	PageMemo page_memo[PAGE_MEMO_SIZE];
 	uint32_t page_memo_next = 0;
+	// Page views resolved once per canvas render: where the view points and what its page is. A memo holds for the
+	// canvas render whose stamp it has, so a new render drops every memo at once.
+	struct ViewMemo {
+		RID view;
+		uint64_t stamp = 0;
+		const TexturePageView *data = nullptr;
+		PageMemo page;
+		// The view's region as the sampler domain takes it, and its array layer and region LOD as instance bits.
+		Rect2 region;
+		uint32_t item_bits = 0;
+	};
+	static constexpr uint32_t VIEW_MEMO_SIZE = 64;
+	ViewMemo view_memo[VIEW_MEMO_SIZE];
+	uint64_t view_memo_stamp = 1;
 	TextureState last_texture_state;
 	TextureInfo *last_texture_info = nullptr;
 
 	void _reset_render_memos();
 	const PageMemo &_get_page_memo(RID p_texture);
+	const ViewMemo &_get_view_memo(RID p_view);
 	_FORCE_INLINE_ TextureInfo *_get_texture_info(const TextureState &p_state) {
 		if (last_texture_info && last_texture_state == p_state) {
 			return last_texture_info;

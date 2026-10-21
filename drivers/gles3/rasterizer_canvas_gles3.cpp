@@ -110,6 +110,21 @@ void RasterizerCanvasGLES3::_reset_page_memo() {
 		memo.texture = RID();
 	}
 	page_memo_next = 0;
+	view_memo_stamp++;
+}
+
+const RasterizerCanvasGLES3::ViewMemo &RasterizerCanvasGLES3::_get_view_memo(RID p_view) {
+	ViewMemo &memo = view_memo[p_view.get_local_index() % VIEW_MEMO_SIZE];
+	if (memo.view == p_view && memo.stamp == view_memo_stamp) {
+		return memo;
+	}
+	memo.view = p_view;
+	memo.stamp = view_memo_stamp;
+	memo.data = texture_page_view_owner.get_or_null(p_view);
+	memo.page = memo.data ? _get_page_memo(memo.data->page_texture) : PageMemo();
+	memo.region = memo.data ? Rect2(memo.data->physical_region) : Rect2();
+	memo.item_bits = memo.data ? memo.data->array_layer | (memo.data->max_region_lod << 11) : 0;
+	return memo;
 }
 
 const RasterizerCanvasGLES3::PageMemo &RasterizerCanvasGLES3::_get_page_memo(RID p_texture) {
@@ -1051,16 +1066,21 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 				state.instance_data_array[r_index].item_data = uint32_t(p_item->mask_set) << 16;
 				const Item::CommandTexturePageRect *rect = static_cast<const Item::CommandTexturePageRect *>(c);
 				GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
-				const PageMemo &page = _get_page_memo(rect->texture);
+				const ViewMemo &resolved = _get_view_memo(rect->view);
+				if (resolved.data == nullptr) {
+					break;
+				}
+				const TexturePageView &view = *resolved.data;
+				const PageMemo &page = resolved.page;
 
 				const Size2i page_size = page.size;
-				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
+				const bool array_requested = view.array_layer != 0 || page.layered;
 				const bool page_kind_valid = page.owned &&
 						(array_requested
-										? page.layered && rect->array_layer < 2048 && rect->array_layer < uint32_t(page.layers)
-										: page.type_2d && rect->array_layer == 0);
-				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid_cached(page.generation, page_size, page.mipmaps);
-				const bool page_generation_valid = page.owned && page.generation == rect->expected_generation;
+										? page.layered && view.array_layer < 2048 && view.array_layer < uint32_t(page.layers)
+										: page.type_2d && view.array_layer == 0);
+				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid_cached(view, page.generation, page_size, page.mipmaps);
+				const bool page_generation_valid = page.owned && page.generation == view.expected_generation;
 				const bool anisotropic_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC ||
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
 				const bool use_page = page_geometry_valid &&
@@ -1073,11 +1093,16 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 					ERR_PRINT_ONCE("CanvasTexturePageView physical metadata is malformed. Drawing its ordinary fallback.");
 				}
 
-				const RID texture = use_page ? rect->texture : rect->fallback_texture;
-				const Rect2 source = use_page ? rect->source : rect->fallback_source;
+				const RID texture = use_page ? view.page_texture : view.fallback_texture;
+				if (use_page && !rect->placed) {
+					break;
+				}
+				const Rect2 drawn_rect = use_page ? rect->placed_rect : rect->rect;
+				Rect2 source = use_page ? rect->placed_source : Rect2();
 				if (!use_page) {
 					GLES3::Texture *fallback_texture = texture_storage->get_texture(texture);
 					const Size2i fallback_size = fallback_texture ? Size2i(fallback_texture->width, fallback_texture->height) : Size2i();
+					source = texture_page_fallback_source(view, rect->source, fallback_size);
 					const bool fallback_valid = fallback_texture &&
 							fallback_texture->type == GLES3::Texture::TYPE_2D &&
 							source.is_finite() &&
@@ -1123,7 +1148,7 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 				_prepare_canvas_texture(texture, state.canvas_instance_batches[state.current_batch_index].filter, state.canvas_instance_batches[state.current_batch_index].repeat, r_index, texpixel_size);
 
 				Rect2 src_rect(source.position * texpixel_size, source.size * texpixel_size);
-				Rect2 dst_rect(rect->rect.position, rect->rect.size);
+				Rect2 dst_rect(drawn_rect.position, drawn_rect.size);
 				if (dst_rect.size.width < 0) {
 					dst_rect.position.x += dst_rect.size.width;
 					dst_rect.size.width *= -1;
@@ -1161,12 +1186,12 @@ void RasterizerCanvasGLES3::_record_item_commands(const Item *p_item, RID p_rend
 				state.instance_data_array[r_index].dst_rect[3] = dst_rect.size.height;
 
 				if (use_page) {
-					const Rect2 sampler_domain(rect->sampler_domain.position * texpixel_size, rect->sampler_domain.size * texpixel_size);
+					const Rect2 sampler_domain(resolved.region.position * texpixel_size, resolved.region.size * texpixel_size);
 					state.instance_data_array[r_index].sampler_domain[0] = sampler_domain.position.x;
 					state.instance_data_array[r_index].sampler_domain[1] = sampler_domain.position.y;
 					state.instance_data_array[r_index].sampler_domain[2] = sampler_domain.size.x;
 					state.instance_data_array[r_index].sampler_domain[3] = sampler_domain.size.y;
-					state.instance_data_array[r_index].item_data |= rect->array_layer | (rect->max_region_lod << 11);
+					state.instance_data_array[r_index].item_data |= resolved.item_bits;
 					state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
 					if (array_requested) {
 						state.instance_data_array[r_index].flags |= INSTANCE_FLAGS_USE_ARRAY_LAYER;

@@ -397,20 +397,14 @@
 			<return type="void" />
 			<param index="0" name="item" type="RID" />
 			<param index="1" name="rect" type="Rect2" />
-			<param index="2" name="page_texture" type="RID" />
-			<param index="3" name="mapped_source" type="Rect2" />
-			<param index="4" name="sampler_domain" type="Rect2" />
-			<param index="5" name="array_layer" type="int" />
-			<param index="6" name="max_region_lod" type="int" />
-			<param index="7" name="expected_generation" type="int" />
-			<param index="8" name="fallback_texture" type="RID" />
-			<param index="9" name="fallback_source" type="Rect2" />
-			<param index="10" name="modulate" type="Color" />
-			<param index="11" name="transpose" type="bool" />
-			<param index="12" name="clip_uv" type="bool" />
+			<param index="2" name="view" type="RID" />
+			<param index="3" name="source" type="Rect2" />
+			<param index="4" name="modulate" type="Color" default="Color(1, 1, 1, 1)" />
+			<param index="5" name="transpose" type="bool" default="false" />
+			<param index="6" name="clip_uv" type="bool" default="false" />
 			<description>
-				Adds a rectangle command that samples [param mapped_source] only inside the complete [param sampler_domain], using explicit mip levels no greater than [param max_region_lod]. That LOD must exist in the page's actual mip chain, both page axes must be divisible by [code]1 &lt;&lt; max_region_lod[/code], and the renderer verifies the physical drawable generation and metadata before selecting this path.
-				[param array_layer] selects a valid layer when [param page_texture] is a drawable 2D texture array; it must be [code]0[/code] for an ordinary drawable texture. Unsupported, malformed, or stale commands draw [param fallback_source] from the ordinary [param fallback_texture]. If that fallback is invalid, the draw remains transparent rather than substituting a white texture.
+				Adds a rectangle that draws [param source], a rectangle of the logical picture of the page view [param view] (see [method canvas_texture_page_view_create]), into [param rect]. The rectangle keeps the view, not the page: the renderer reads where the view points when it draws, so [method canvas_texture_page_view_set] moves every rectangle that shows the view without recording them again.
+				The rectangle samples only inside the physical region of the view, using explicit mip levels no greater than its maximum region LOD. The part of [param source] outside the part of the picture that the region holds is transparent and is not drawn. A view that was never set, that shows only its fallback (see [method canvas_texture_page_view_set_fallback]), whose page is gone, whose generation no longer matches the page, or whose place does not fit the page draws the same logical rectangle from the fallback texture of the view, scaled from the logical size of the whole picture to the size of the fallback. Texture repeat, anisotropic filtering and [param clip_uv] draw the fallback too. Without a valid fallback, the rectangle draws nothing rather than a white texture.
 			</description>
 		</method>
 		<method name="canvas_item_add_texture_rect">
@@ -1197,6 +1191,41 @@
 				Creates a canvas texture and adds it to the RenderingServer. It can be accessed with the RID that is returned. This RID will be used in all [code]canvas_texture_*[/code] RenderingServer functions.
 				Once finished with your RID, you will want to free the RID using the RenderingServer's [method free_rid] method. See also [method texture_2d_create].
 				[b]Note:[/b] The equivalent resource is [CanvasTexture] and is only meant to be used in 2D rendering, not 3D.
+			</description>
+		</method>
+		<method name="canvas_texture_page_view_create">
+			<return type="RID" />
+			<description>
+				Creates a page view: the place of one picture on a drawable page, drawn with [method canvas_item_add_texture_page_rect_region]. It draws nothing until it is set with [method canvas_texture_page_view_set] or [method canvas_texture_page_view_set_fallback].
+				Once finished with your RID, you will want to free the RID using the RenderingServer's [method free_rid] method. Rectangles that still show a freed view draw nothing.
+				[b]Note:[/b] The equivalent resource is [CanvasTexturePageView].
+			</description>
+		</method>
+		<method name="canvas_texture_page_view_set">
+			<return type="void" />
+			<param index="0" name="view" type="RID" />
+			<param index="1" name="page_texture" type="RID" />
+			<param index="2" name="physical_region" type="Rect2i" />
+			<param index="3" name="array_layer" type="int" />
+			<param index="4" name="max_region_lod" type="int" />
+			<param index="5" name="expected_generation" type="int" />
+			<param index="6" name="fallback_texture" type="RID" />
+			<param index="7" name="logical_size" type="Vector2i" />
+			<param index="8" name="logical_offset" type="Vector2i" />
+			<description>
+				Points [param view] at [param physical_region] of the drawable page [param page_texture], in layer [param array_layer] when the page is a drawable 2D texture array ([code]0[/code] for an ordinary drawable texture). Rectangles sample mip levels up to [param max_region_lod]: that level must exist in the mip chain of the page, and the page size and the position and size of the region must be divisible by [code]1 &lt;&lt; max_region_lod[/code].
+				[param logical_size] is the size of the whole logical picture, in which rectangles give their source. The region holds the part of the picture that starts at [param logical_offset] and has the size of the region; the rest of the picture is transparent and is not drawn from the page. A region that does not fit the picture is drawn like one that does not fit the page.
+				The page is drawn only while its drawable generation equals [param expected_generation]. Otherwise, and when the region does not fit the page, the rectangles of the view draw [param fallback_texture], an ordinary 2D texture scaled to the logical size, or nothing without one.
+				Like every server call, a set takes effect from the next frame drawn after it, together with every other call made in the same frame, also with a separate render thread. Set every view of a moved picture before its old place is freed or overwritten.
+			</description>
+		</method>
+		<method name="canvas_texture_page_view_set_fallback">
+			<return type="void" />
+			<param index="0" name="view" type="RID" />
+			<param index="1" name="fallback_texture" type="RID" />
+			<param index="2" name="logical_size" type="Vector2i" />
+			<description>
+				Lets [param view] go of its page: its rectangles draw [param fallback_texture], an ordinary 2D texture scaled to [param logical_size], the size of the whole logical picture, or nothing without one, until the view is set on a page again with [method canvas_texture_page_view_set]. Like [method canvas_texture_page_view_set], it takes effect from the next frame drawn after it.
 			</description>
 		</method>
 		<method name="canvas_texture_set_channel">

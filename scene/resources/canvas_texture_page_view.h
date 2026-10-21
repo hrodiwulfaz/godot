@@ -36,6 +36,8 @@ class CanvasTexturePageView : public Texture2D {
 	GDCLASS(CanvasTexturePageView, Texture2D);
 	RES_BASE_EXTENSION("tex");
 
+	// The rendering server's page view: page rectangles keep it, so a move is drawn without recording them again.
+	RID view;
 	Ref<Texture> page_texture;
 	Rect2i physical_region;
 	Size2i logical_size;
@@ -43,6 +45,8 @@ class CanvasTexturePageView : public Texture2D {
 	uint32_t max_region_lod = 0;
 	uint64_t expected_generation = 0;
 	Ref<Texture2D> fallback_texture;
+	Size2 fallback_size;
+	bool alpha = true;
 	bool configured = false;
 
 	Rect2 _get_fallback_source(const Rect2 &p_logical_source) const;
@@ -50,8 +54,11 @@ class CanvasTexturePageView : public Texture2D {
 protected:
 	static void _bind_methods();
 
+	bool _set_picture(const Size2i &p_logical_size, const Ref<Texture2D> &p_fallback_texture);
+
 public:
-	Error configure(const Ref<Texture> &p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, const Ref<Texture2D> &p_fallback_texture);
+	Error configure(const Ref<Texture> &p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, const Ref<Texture2D> &p_fallback_texture, const Vector2i &p_logical_size = Vector2i(), const Vector2i &p_logical_offset = Vector2i());
+	Error configure_fallback(const Ref<Texture2D> &p_fallback_texture, const Vector2i &p_logical_size);
 
 	virtual Image::Format get_format() const override;
 	virtual int get_mipmap_count() const override;
@@ -68,4 +75,7 @@ public:
 	virtual void draw_rect_region(RID p_canvas_item, const Rect2 &p_rect, const Rect2 &p_src_rect, const Color &p_modulate = Color(1, 1, 1), bool p_transpose = false, bool p_clip_uv = true) const override;
 	virtual bool get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, Rect2 &r_rect, Rect2 &r_src_rect) const override;
 	bool get_rect_region(const Rect2 &p_rect, const Rect2 &p_src_rect, bool p_transpose, Rect2 &r_rect, Rect2 &r_src_rect) const;
+
+	CanvasTexturePageView();
+	~CanvasTexturePageView();
 };

@@ -3320,6 +3320,9 @@ void RenderingServer::_bind_methods() {
 
 	/* CANVAS ITEM */
 
+	ClassDB::bind_method(D_METHOD("canvas_texture_page_view_create"), &RenderingServer::canvas_texture_page_view_create);
+	ClassDB::bind_method(D_METHOD("canvas_texture_page_view_set", "view", "page_texture", "physical_region", "array_layer", "max_region_lod", "expected_generation", "fallback_texture", "logical_size", "logical_offset"), &RenderingServer::canvas_texture_page_view_set);
+	ClassDB::bind_method(D_METHOD("canvas_texture_page_view_set_fallback", "view", "fallback_texture", "logical_size"), &RenderingServer::canvas_texture_page_view_set_fallback);
 	ClassDB::bind_method(D_METHOD("canvas_mask_create"), &RenderingServer::canvas_mask_create);
 	ClassDB::bind_method(D_METHOD("canvas_mask_set_owner", "mask", "canvas_item"), &RenderingServer::canvas_mask_set_owner);
 	ClassDB::bind_method(D_METHOD("canvas_mask_set_transform", "mask", "unit_to_owner"), &RenderingServer::canvas_mask_set_transform);
@@ -3365,7 +3368,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("canvas_item_add_msdf_texture_rect_region", "item", "rect", "texture", "src_rect", "modulate", "outline_size", "px_range", "scale"), &RenderingServer::canvas_item_add_msdf_texture_rect_region, DEFVAL(Color(1, 1, 1)), DEFVAL(0), DEFVAL(1.0), DEFVAL(1.0));
 	ClassDB::bind_method(D_METHOD("canvas_item_add_lcd_texture_rect_region", "item", "rect", "texture", "src_rect", "modulate"), &RenderingServer::canvas_item_add_lcd_texture_rect_region);
 	ClassDB::bind_method(D_METHOD("canvas_item_add_texture_rect_region", "item", "rect", "texture", "src_rect", "modulate", "transpose", "clip_uv"), &RenderingServer::canvas_item_add_texture_rect_region, DEFVAL(Color(1, 1, 1)), DEFVAL(false), DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("canvas_item_add_texture_page_rect_region", "item", "rect", "page_texture", "mapped_source", "sampler_domain", "array_layer", "max_region_lod", "expected_generation", "fallback_texture", "fallback_source", "modulate", "transpose", "clip_uv"), &RenderingServer::canvas_item_add_texture_page_rect_region);
+	ClassDB::bind_method(D_METHOD("canvas_item_add_texture_page_rect_region", "item", "rect", "view", "source", "modulate", "transpose", "clip_uv"), &RenderingServer::canvas_item_add_texture_page_rect_region, DEFVAL(Color(1, 1, 1)), DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("canvas_item_add_nine_patch", "item", "rect", "source", "texture", "topleft", "bottomright", "x_axis_mode", "y_axis_mode", "draw_center", "modulate"), &RenderingServer::canvas_item_add_nine_patch, DEFVAL(RSE::NINE_PATCH_STRETCH), DEFVAL(RSE::NINE_PATCH_STRETCH), DEFVAL(true), DEFVAL(Color(1, 1, 1)));
 	ClassDB::bind_method(D_METHOD("canvas_item_add_primitive", "item", "points", "colors", "uvs", "texture"), &RenderingServer::canvas_item_add_primitive);
 	ClassDB::bind_method(D_METHOD("canvas_item_add_polygon", "item", "points", "colors", "uvs", "texture"), &RenderingServer::canvas_item_add_polygon, DEFVAL(Vector<Point2>()), DEFVAL(RID()));

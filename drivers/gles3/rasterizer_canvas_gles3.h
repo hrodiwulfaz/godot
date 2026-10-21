@@ -409,8 +409,23 @@ public:
 	static constexpr uint32_t PAGE_MEMO_SIZE = 4;
 	PageMemo page_memo[PAGE_MEMO_SIZE];
 	uint32_t page_memo_next = 0;
+	// Page views resolved once per canvas render: where the view points and what its page is. A memo holds for the
+	// canvas render whose stamp it has, so a new render drops every memo at once.
+	struct ViewMemo {
+		RID view;
+		uint64_t stamp = 0;
+		const TexturePageView *data = nullptr;
+		PageMemo page;
+		// The view's region as the sampler domain takes it, and its array layer and region LOD as instance bits.
+		Rect2 region;
+		uint32_t item_bits = 0;
+	};
+	static constexpr uint32_t VIEW_MEMO_SIZE = 64;
+	ViewMemo view_memo[VIEW_MEMO_SIZE];
+	uint64_t view_memo_stamp = 1;
 	void _reset_page_memo();
 	const PageMemo &_get_page_memo(RID p_texture);
+	const ViewMemo &_get_view_memo(RID p_view);
 
 	void _new_batch(bool &r_batch_broken);
 	void _add_to_batch(uint32_t &r_index, bool &r_batch_broken);

@@ -91,7 +91,73 @@ public partial class Main : Node
         Check(IsCyan(arrayUnmodified), "The layered page draw did not select the configured array layer.", ref failures);
         Check(IsCyan(arrayMaterialModified) && arrayMaterialModified.G < arrayUnmodified.G * 0.8f && arrayMaterialModified.B < arrayUnmodified.B * 0.8f,
             "The COLOR-only material did not modify the layered page sample.", ref failures);
+        return await QualifyMovedViews(arrayPage, arrayView, arrayFallback, failures);
+    }
+
+    // A drawn page view follows its moves without being recorded again, and draws its fallback once its page has a
+    // newer generation.
+    private async Task<int> QualifyMovedViews(DrawableTexture2DArray arrayPage, CanvasTexturePageView arrayView, Texture2D arrayFallback, int failures)
+    {
+        var generation = arrayPage.GetGeneration();
+        var changes = 0;
+        void CountChange() => changes++;
+        arrayView.Changed += CountChange;
+        var replacement = RenderingServer.TextureDrawableLayeredCreate(8, 8, 2, RenderingServer.TextureDrawableFormat.Rgba8, Colors.Transparent, true);
+        var colors = await RenderSteps(arrayView,
+            () => { },
+            () => arrayView.Configure(arrayPage, new Rect2I(0, 0, 8, 8), 0, 0, generation, arrayFallback),
+            () =>
+            {
+                arrayView.Configure(arrayPage, new Rect2I(0, 0, 8, 8), 1, 0, generation, arrayFallback);
+                arrayView.Configure(arrayPage, new Rect2I(0, 0, 8, 8), 0, 0, generation, arrayFallback);
+                arrayView.Configure(arrayPage, new Rect2I(0, 0, 8, 8), 1, 0, generation, arrayFallback);
+            },
+            () => RenderingServer.TextureReplace(arrayPage.GetRid(), replacement));
+        arrayView.Changed -= CountChange;
+        GD.Print($"OUTPOSTIA_RD_CANVAS_PAGE_MOVED_VIEW colors={string.Join(' ', colors)} changes={changes}");
+        Check(IsCyan(colors[0]), "The page view did not draw its configured layer.", ref failures);
+        Check(IsRed(colors[1]), "The moved page view did not draw its new layer.", ref failures);
+        Check(IsCyan(colors[2]), "Several moves in one frame did not draw the last place.", ref failures);
+        Check(IsYellow(colors[3]), "A page view of an older page generation did not draw its fallback.", ref failures);
+        Check(changes == 0, "Moving a page view emitted a change.", ref failures);
         return failures;
+    }
+
+    private async Task<Color[]> RenderSteps(Texture2D texture, params Action[] steps)
+    {
+        var viewport = new SubViewport
+        {
+            Size = new Vector2I(8, 8),
+            Disable3D = true,
+            TransparentBg = false,
+            RenderTargetClearMode = SubViewport.ClearMode.Always,
+            RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
+        };
+        var rect = new TextureRect
+        {
+            Texture = texture,
+            Size = new Vector2(8, 8),
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.Scale,
+            TextureFilter = CanvasItem.TextureFilterEnum.NearestWithMipmaps,
+        };
+        viewport.AddChild(rect);
+        AddChild(viewport);
+        var colors = new Color[steps.Length];
+        for (var step = 0; step < steps.Length; step++)
+        {
+            steps[step]();
+            for (var frame = 0; frame < 4; frame++)
+            {
+                await ToSignal(RenderingServer.Singleton, RenderingServer.SignalName.FramePostDraw);
+            }
+            RenderingServer.ForceSync();
+            colors[step] = viewport.GetTexture().GetImage().GetPixel(0, 0);
+        }
+        viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
+        viewport.QueueFree();
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        return colors;
     }
 
     private async Task<Color> Render(Texture2D texture, Material? material, Color modulate, bool repeat, Vector2I viewportSize, Vector2 drawSize)
@@ -156,6 +222,8 @@ public partial class Main : Node
     private static bool IsBlue(Color color) => color.B > 0.5f && color.R < 0.1f && color.G < 0.1f;
     private static bool IsMagenta(Color color) => color.R > 0.5f && color.B > 0.5f && color.G < 0.1f;
     private static bool IsCyan(Color color) => color.G > 0.2f && color.B > 0.2f && color.R < 0.1f;
+    private static bool IsRed(Color color) => color.R > 0.5f && color.G < 0.1f && color.B < 0.1f;
+    private static bool IsYellow(Color color) => color.R > 0.5f && color.G > 0.5f && color.B < 0.1f;
 
     private static void Check(bool condition, string message, ref int failures)
     {

@@ -36,8 +36,7 @@
 #include "scene/resources/drawable_texture_2d_array.h"
 #include "servers/rendering/rendering_server.h"
 
-Error CanvasTexturePageView::configure(const Ref<Texture> &p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, const Ref<Texture2D> &p_fallback_texture) {
-	ERR_FAIL_COND_V(configured, ERR_ALREADY_IN_USE);
+Error CanvasTexturePageView::configure(const Ref<Texture> &p_page_texture, const Rect2i &p_physical_region, uint32_t p_array_layer, uint32_t p_max_region_lod, uint64_t p_expected_generation, const Ref<Texture2D> &p_fallback_texture, const Vector2i &p_logical_size, const Vector2i &p_logical_offset) {
 	ERR_FAIL_COND_V(p_page_texture.is_null(), ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_physical_region.position.x < 0 || p_physical_region.position.y < 0 || p_physical_region.size.x <= 0 || p_physical_region.size.y <= 0, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_max_region_lod > 30 || p_expected_generation == 0, ERR_INVALID_PARAMETER);
@@ -66,16 +65,60 @@ Error CanvasTexturePageView::configure(const Ref<Texture> &p_page_texture, const
 	ERR_FAIL_COND_V(uint32_t(p_physical_region.position.x) % alignment != 0 || uint32_t(p_physical_region.position.y) % alignment != 0, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(uint32_t(p_physical_region.size.x) % alignment != 0 || uint32_t(p_physical_region.size.y) % alignment != 0, ERR_INVALID_PARAMETER);
 
+	const Size2i new_logical_size = p_logical_size == Vector2i() ? Size2i(p_physical_region.size) : Size2i(p_logical_size);
+	ERR_FAIL_COND_V(new_logical_size.x <= 0 || new_logical_size.y <= 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_logical_offset.x < 0 || p_logical_offset.y < 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(int64_t(p_logical_offset.x) + p_physical_region.size.x > new_logical_size.x || int64_t(p_logical_offset.y) + p_physical_region.size.y > new_logical_size.y, ERR_INVALID_PARAMETER);
+
+	const bool mip_count_changed = configured && max_region_lod != p_max_region_lod;
 	page_texture = p_page_texture;
 	physical_region = p_physical_region;
-	logical_size = p_physical_region.size;
 	array_layer = p_array_layer;
 	max_region_lod = p_max_region_lod;
 	expected_generation = p_expected_generation;
-	fallback_texture = p_fallback_texture;
-	configured = true;
-	emit_changed();
+	const bool picture_changed = _set_picture(new_logical_size, p_fallback_texture) || mip_count_changed;
+	RenderingServer::get_singleton()->canvas_texture_page_view_set(view, page_rid, physical_region, array_layer, max_region_lod, expected_generation, fallback_texture.is_valid() ? fallback_texture->get_rid() : RID(), logical_size, p_logical_offset);
+	if (picture_changed) {
+		emit_changed();
+	}
 	return OK;
+}
+
+Error CanvasTexturePageView::configure_fallback(const Ref<Texture2D> &p_fallback_texture, const Vector2i &p_logical_size) {
+	ERR_FAIL_COND_V(p_logical_size.x <= 0 || p_logical_size.y <= 0, ERR_INVALID_PARAMETER);
+	if (p_fallback_texture.is_valid()) {
+		ERR_FAIL_COND_V(p_fallback_texture->get_width() <= 0 || p_fallback_texture->get_height() <= 0 || p_fallback_texture->get_rid().is_null(), ERR_INVALID_PARAMETER);
+	}
+
+	// The page is let go; the mip count stays, so showing the fallback for a while changes nothing users keep.
+	page_texture.unref();
+	physical_region = Rect2i();
+	array_layer = 0;
+	expected_generation = 0;
+	const bool picture_changed = _set_picture(p_logical_size, p_fallback_texture);
+	RenderingServer::get_singleton()->canvas_texture_page_view_set_fallback(view, fallback_texture.is_valid() ? fallback_texture->get_rid() : RID(), logical_size);
+	if (picture_changed) {
+		emit_changed();
+	}
+	return OK;
+}
+
+// Users that keep values of the picture (its size, mip count, alpha, the fallback they draw directly) record again on a
+// change; a move to another place of the same picture, or to its fallback, changes none of them.
+bool CanvasTexturePageView::_set_picture(const Size2i &p_logical_size, const Ref<Texture2D> &p_fallback_texture) {
+	const Size2 new_fallback_size = p_fallback_texture.is_valid() ? p_fallback_texture->get_size() : Size2();
+	const bool new_alpha = p_fallback_texture.is_null() || p_fallback_texture->has_alpha();
+	const bool changed = !configured ||
+			logical_size != p_logical_size ||
+			alpha != new_alpha ||
+			fallback_texture != p_fallback_texture ||
+			fallback_size != new_fallback_size;
+	logical_size = p_logical_size;
+	fallback_texture = p_fallback_texture;
+	fallback_size = new_fallback_size;
+	alpha = new_alpha;
+	configured = true;
+	return changed;
 }
 
 Image::Format CanvasTexturePageView::get_format() const {
@@ -99,7 +142,7 @@ bool CanvasTexturePageView::is_pixel_opaque(int p_x, int p_y) const {
 }
 
 bool CanvasTexturePageView::has_alpha() const {
-	return fallback_texture.is_valid() ? fallback_texture->has_alpha() : true;
+	return alpha;
 }
 
 bool CanvasTexturePageView::has_mipmaps() const {
@@ -138,29 +181,14 @@ void CanvasTexturePageView::draw_rect_region(RID p_canvas_item, const Rect2 &p_r
 	if (!get_rect_region(p_rect, p_src_rect, p_transpose, clipped_rect, clipped_source)) {
 		return;
 	}
-	const Rect2 fallback_source = _get_fallback_source(clipped_source);
 	if (p_clip_uv) {
 		if (fallback_texture.is_valid()) {
-			fallback_texture->draw_rect_region(p_canvas_item, clipped_rect, fallback_source, p_modulate, p_transpose, false);
+			fallback_texture->draw_rect_region(p_canvas_item, clipped_rect, _get_fallback_source(clipped_source), p_modulate, p_transpose, false);
 		}
 		return;
 	}
 
-	const Rect2 mapped_source(Vector2(physical_region.position) + clipped_source.position, clipped_source.size);
-	RenderingServer::get_singleton()->canvas_item_add_texture_page_rect_region(
-			p_canvas_item,
-			clipped_rect,
-			page_texture->get_rid(),
-			mapped_source,
-			Rect2(physical_region),
-			array_layer,
-			max_region_lod,
-			expected_generation,
-			fallback_texture.is_valid() ? fallback_texture->get_rid() : RID(),
-			fallback_source,
-			p_modulate,
-			p_transpose,
-			false);
+	RenderingServer::get_singleton()->canvas_item_add_texture_page_rect_region(p_canvas_item, clipped_rect, view, clipped_source, p_modulate, p_transpose, false);
 }
 
 Rect2 CanvasTexturePageView::_get_fallback_source(const Rect2 &p_logical_source) const {
@@ -200,5 +228,15 @@ bool CanvasTexturePageView::get_rect_region(const Rect2 &p_rect, const Rect2 &p_
 }
 
 void CanvasTexturePageView::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("configure", "page_texture", "physical_region", "array_layer", "max_region_lod", "expected_generation", "fallback_texture"), &CanvasTexturePageView::configure, DEFVAL(Ref<Texture2D>()));
+	ClassDB::bind_method(D_METHOD("configure", "page_texture", "physical_region", "array_layer", "max_region_lod", "expected_generation", "fallback_texture", "logical_size", "logical_offset"), &CanvasTexturePageView::configure, DEFVAL(Ref<Texture2D>()), DEFVAL(Vector2i()), DEFVAL(Vector2i()));
+	ClassDB::bind_method(D_METHOD("configure_fallback", "fallback_texture", "logical_size"), &CanvasTexturePageView::configure_fallback);
+}
+
+CanvasTexturePageView::CanvasTexturePageView() {
+	view = RenderingServer::get_singleton()->canvas_texture_page_view_create();
+}
+
+CanvasTexturePageView::~CanvasTexturePageView() {
+	ERR_FAIL_NULL(RenderingServer::get_singleton());
+	RenderingServer::get_singleton()->free_rid(view);
 }

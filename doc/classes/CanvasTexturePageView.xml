@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="CanvasTexturePageView" inherits="Texture2D" api_type="core" experimental="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		An immutable logical view into an isolated region of a drawable texture page.
+		A logical view into an isolated region of a drawable texture page.
 	</brief_description>
 	<description>
 		[CanvasTexturePageView] maps ordinary [Texture2D] drawing to one independently mipmapped region of a physical drawable page. The page may be an ordinary [DrawableTexture2D] or one layer of a [DrawableTexture2DArray]. Its logical dimensions are stored independently from an optional fallback. Direct RID and image access return the fallback, or an invalid RID and [code]null[/code] image when none is supplied, so unsupported consumers never bind a physical page or array RID as an ordinary logical texture.
 		Compatible canvas materials may modify the already sampled [code]COLOR[/code] or sample their own uniform textures. They must not re-sample page data through the built-in [code]TEXTURE[/code], [code]UV[/code], or [code]REGION_RECT[/code] values. Layered page data is not exposed through the ordinary 2D [code]TEXTURE[/code] binding.
-		Configure a new view before publishing it. Published views are immutable; replace the view held by an outer [AtlasTexture] when placement or generation changes.
+		Each view owns one page view of the [RenderingServer] for its lifetime (see [method RenderingServer.canvas_texture_page_view_create]), and its draws keep that page view. When the picture moves to another place, layer, page or generation, [method configure] moves the view, and every draw that shows it follows from the next frame without being recorded again. [method configure_fallback] lets the page go and shows only the fallback, also without recording again.
+		The view is the whole logical picture: its region on the page may hold only the part of the picture that is not transparent, and draws of the rest show nothing.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -19,10 +20,23 @@
 			<param index="3" name="max_region_lod" type="int" />
 			<param index="4" name="expected_generation" type="int" />
 			<param index="5" name="fallback_texture" type="Texture2D" default="null" />
+			<param index="6" name="logical_size" type="Vector2i" default="Vector2i(0, 0)" />
+			<param index="7" name="logical_offset" type="Vector2i" default="Vector2i(0, 0)" />
 			<description>
-				Configures this view once. [param physical_region] defines the logical size and must fit the drawable page. Its position and size, and both page axes, must be aligned for every level through [param max_region_lod]. The requested LOD must exist in the page's actual mip chain, and [param expected_generation] must match the current drawable generation.
+				Configures this view, or moves it. [param physical_region] must fit the drawable page. Its position and size, and both page axes, must be aligned for every level through [param max_region_lod]. The requested LOD must exist in the page's actual mip chain, and [param expected_generation] must match the current drawable generation.
+				[param logical_size] is the size of the whole picture, the size of this texture; [code]Vector2i(0, 0)[/code] uses the size of [param physical_region]. The region holds the part of the picture at [param logical_offset], which must lie inside the picture with the whole region; the rest of the picture is transparent.
+				A non-default logical size must be positive on both axes. Negative offsets, overflowing coordinates, regions outside the page or logical picture, invalid layers or mip levels, and stale generations are refused before changing the view or emitting [signal Resource.changed].
 				[param fallback_texture] is optional. A same-sized fallback preserves exact ordinary-texture access; a smaller shared transparent fallback is scaled to the logical source domain. Without a fallback, unsupported or stale draws remain transparent while preserving the logical layout.
-				For an ordinary [DrawableTexture2D], [param array_layer] must be [code]0[/code]. For a [DrawableTexture2DArray], it selects one valid array layer. Unsupported, stale, or repeated configurations return a non-[constant @GlobalScope.OK] result without changing the view.
+				For an ordinary [DrawableTexture2D], [param array_layer] must be [code]0[/code]. For a [DrawableTexture2DArray], it selects one valid array layer. Unsupported or stale configurations return a non-[constant @GlobalScope.OK] result without changing the view.
+				[signal Resource.changed] is emitted on the first configuration and when something that users of the texture keep changes: the logical size, the mip count, the alpha, or the fallback texture or its size. A move that keeps all of these emits nothing, also when the region holds another part of the picture.
+			</description>
+		</method>
+		<method name="configure_fallback">
+			<return type="int" enum="Error" />
+			<param index="0" name="fallback_texture" type="Texture2D" />
+			<param index="1" name="logical_size" type="Vector2i" />
+			<description>
+				Lets the page go: draws show [param fallback_texture] scaled to [param logical_size], or nothing without a fallback, until [method configure] places the view on a page again. The mip count of the last place is kept. [signal Resource.changed] is emitted under the same rules as for [method configure].
 			</description>
 		</method>
 	</methods>

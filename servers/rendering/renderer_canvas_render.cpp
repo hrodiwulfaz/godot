@@ -224,45 +224,47 @@ uint32_t RendererCanvasRender::deform_follow_code(uint32_t p_chain, uint32_t p_s
 	return (word >> (DEFORM_FOLLOW_CODE_SHIFT + (p_slot & 1) * DEFORM_FOLLOW_CODE_BITS)) & ((1u << DEFORM_FOLLOW_CODE_BITS) - 1);
 }
 
-bool RendererCanvasRender::Item::CommandTexturePageRect::is_geometry_valid(const Size2i &p_page_size, int p_mipmap_count) const {
+bool RendererCanvasRender::Item::CommandTexturePageRect::is_geometry_valid(const TexturePageView &p_view, const Size2i &p_page_size, int p_mipmap_count) const {
 	const uint16_t required_flags = CANVAS_RECT_REGION | CANVAS_RECT_REGION_SAMPLING;
 	const uint16_t incompatible_flags = CANVAS_RECT_TILE | CANVAS_RECT_MSDF | CANVAS_RECT_LCD | CANVAS_RECT_IS_GROUP;
 	if ((flags & required_flags) != required_flags || (flags & incompatible_flags) != 0) {
 		return false;
 	}
-	if (expected_generation == 0 || p_page_size.x <= 0 || p_page_size.y <= 0 || p_mipmap_count <= 0) {
+	if (p_view.expected_generation == 0 || p_page_size.x <= 0 || p_page_size.y <= 0 || p_mipmap_count <= 0) {
 		return false;
 	}
-	if (!rect.is_finite() || !source.is_finite() || !sampler_domain.is_finite()) {
+	if (!rect.is_finite() || !rect.get_end().is_finite() || !source.is_finite() || !source.get_end().is_finite()) {
 		return false;
 	}
-	if (rect.size.x < 0 || rect.size.y < 0 || source.size.x <= 0 || source.size.y <= 0 || sampler_domain.size.x <= 0 || sampler_domain.size.y <= 0) {
+	const int64_t region_x = p_view.physical_region.position.x;
+	const int64_t region_y = p_view.physical_region.position.y;
+	const int64_t region_width = p_view.physical_region.size.x;
+	const int64_t region_height = p_view.physical_region.size.y;
+	if (rect.size.x < 0 || rect.size.y < 0 || source.size.x <= 0 || source.size.y <= 0 || region_x < 0 || region_y < 0 || region_width <= 0 || region_height <= 0) {
 		return false;
 	}
-	if (!sampler_domain.encloses(source) || !Rect2(Vector2(), p_page_size).encloses(sampler_domain)) {
+	if (region_x + region_width > p_page_size.x || region_y + region_height > p_page_size.y) {
 		return false;
 	}
-	if (sampler_domain.position.x != Math::floor(sampler_domain.position.x) ||
-			sampler_domain.position.y != Math::floor(sampler_domain.position.y) ||
-			sampler_domain.size.x != Math::floor(sampler_domain.size.x) ||
-			sampler_domain.size.y != Math::floor(sampler_domain.size.y)) {
+	const int64_t logical_width = p_view.logical_size.x;
+	const int64_t logical_height = p_view.logical_size.y;
+	if (p_view.logical_offset.x < 0 || p_view.logical_offset.y < 0 || p_view.logical_offset.x + region_width > logical_width || p_view.logical_offset.y + region_height > logical_height) {
 		return false;
 	}
-	if (max_region_lod > 30 || max_region_lod >= uint32_t(p_mipmap_count)) {
+	if (!Rect2(0, 0, real_t(logical_width), real_t(logical_height)).encloses(source)) {
 		return false;
 	}
-	const uint32_t alignment = 1U << max_region_lod;
+	if (p_view.max_region_lod > 30 || p_view.max_region_lod >= uint32_t(p_mipmap_count)) {
+		return false;
+	}
+	const uint32_t alignment = 1U << p_view.max_region_lod;
 	if (uint32_t(p_page_size.x) % alignment != 0 || uint32_t(p_page_size.y) % alignment != 0) {
 		return false;
 	}
-	const int64_t domain_x = int64_t(sampler_domain.position.x);
-	const int64_t domain_y = int64_t(sampler_domain.position.y);
-	const int64_t domain_width = int64_t(sampler_domain.size.x);
-	const int64_t domain_height = int64_t(sampler_domain.size.y);
-	if (domain_x % alignment != 0 || domain_y % alignment != 0 || domain_width % alignment != 0 || domain_height % alignment != 0) {
+	if (region_x % alignment != 0 || region_y % alignment != 0 || region_width % alignment != 0 || region_height % alignment != 0) {
 		return false;
 	}
-	return domain_width >= alignment && domain_height >= alignment;
+	return region_width >= alignment && region_height >= alignment;
 }
 
 const Rect2 &RendererCanvasRender::Item::get_rect() const {

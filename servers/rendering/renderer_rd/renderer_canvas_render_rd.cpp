@@ -629,7 +629,22 @@ void RendererCanvasRenderRD::_reset_render_memos() {
 		memo.texture = RID();
 	}
 	page_memo_next = 0;
+	view_memo_stamp++;
 	last_texture_info = nullptr;
+}
+
+const RendererCanvasRenderRD::ViewMemo &RendererCanvasRenderRD::_get_view_memo(RID p_view) {
+	ViewMemo &memo = view_memo[p_view.get_local_index() % VIEW_MEMO_SIZE];
+	if (memo.view == p_view && memo.stamp == view_memo_stamp) {
+		return memo;
+	}
+	memo.view = p_view;
+	memo.stamp = view_memo_stamp;
+	memo.data = texture_page_view_owner.get_or_null(p_view);
+	memo.page = memo.data ? _get_page_memo(memo.data->page_texture) : PageMemo();
+	memo.region = memo.data ? Rect2(memo.data->physical_region) : Rect2();
+	memo.item_bits = memo.data ? memo.data->array_layer | (memo.data->max_region_lod << 11) : 0;
+	return memo;
 }
 
 const RendererCanvasRenderRD::PageMemo &RendererCanvasRenderRD::_get_page_memo(RID p_texture) {
@@ -2914,17 +2929,22 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				const Item::CommandTexturePageRect *rect = static_cast<const Item::CommandTexturePageRect *>(c);
 				RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
-				const PageMemo &page = _get_page_memo(rect->texture);
+				const ViewMemo &resolved = _get_view_memo(rect->view);
+				if (resolved.data == nullptr) {
+					break;
+				}
+				const TexturePageView &view = *resolved.data;
+				const PageMemo &page = resolved.page;
 				const bool page_owned = page.owned;
 				const Size2i page_size = page.size;
 				const int page_mipmap_count = page.mipmaps;
-				const bool array_requested = rect->array_layer != 0 || bool(rect->flags & CANVAS_RECT_ARRAY_LAYER);
+				const bool array_requested = view.array_layer != 0 || page.layered;
 				const bool page_kind_valid = page_owned &&
 						(array_requested
-										? page.layered && rect->array_layer < 2048 && rect->array_layer < uint32_t(page.layers)
-										: page.type_2d && rect->array_layer == 0);
-				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid_cached(page.generation, page_size, page_mipmap_count);
-				const bool page_generation_valid = page_owned && page.generation == rect->expected_generation;
+										? page.layered && view.array_layer < 2048 && view.array_layer < uint32_t(page.layers)
+										: page.type_2d && view.array_layer == 0);
+				const bool page_geometry_valid = page_kind_valid && rect->is_geometry_valid_cached(view, page.generation, page_size, page_mipmap_count);
+				const bool page_generation_valid = page_owned && page.generation == view.expected_generation;
 				const bool anisotropic_filter = texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC ||
 						texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
 				const bool use_page = page_geometry_valid &&
@@ -2938,11 +2958,16 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 					ERR_PRINT_ONCE("CanvasTexturePageView physical metadata is malformed. Drawing its ordinary fallback.");
 				}
 
-				const RID texture = use_page ? rect->texture : rect->fallback_texture;
-				const Rect2 source = use_page ? rect->source : rect->fallback_source;
+				const RID texture = use_page ? view.page_texture : view.fallback_texture;
+				if (use_page && !rect->placed) {
+					break;
+				}
+				const Rect2 drawn_rect = use_page ? rect->placed_rect : rect->rect;
+				Rect2 source = use_page ? rect->placed_source : Rect2();
 				if (!use_page) {
 					const bool fallback_owned = texture_storage->owns_texture(texture);
 					const Size2i fallback_size = fallback_owned ? texture_storage->texture_2d_get_size(texture) : Size2i();
+					source = texture_page_fallback_source(view, rect->source, fallback_size);
 					const bool fallback_valid = fallback_owned &&
 							texture_storage->texture_get_type(texture) == RendererRD::TextureStorage::TYPE_2D &&
 							source.is_finite() &&
@@ -3010,11 +3035,11 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				}
 
 				InstanceData *instance_data = new_instance_data(*r_current_batch, template_instance);
-				if (!_record_masks(r_current_batch, r_batch_broken, instance_data, p_item, draw_transform, rect->rect.size)) {
+				if (!_record_masks(r_current_batch, r_batch_broken, instance_data, p_item, draw_transform, drawn_rect.size)) {
 					break;
 				}
 				Rect2 src_rect(source.position * tex_info->texpixel_size, source.size * tex_info->texpixel_size);
-				Rect2 dst_rect(rect->rect.position, rect->rect.size);
+				Rect2 dst_rect(drawn_rect.position, drawn_rect.size);
 
 				if (dst_rect.size.width < 0) {
 					dst_rect.position.x += dst_rect.size.width;
@@ -3053,12 +3078,12 @@ void RendererCanvasRenderRD::_record_item_commands(const Item *p_item, RenderTar
 				instance_data->dst_rect[3] = dst_rect.size.height;
 
 				if (use_page) {
-					const Rect2 sampler_domain(rect->sampler_domain.position * tex_info->texpixel_size, rect->sampler_domain.size * tex_info->texpixel_size);
+					const Rect2 sampler_domain(resolved.region.position * tex_info->texpixel_size, resolved.region.size * tex_info->texpixel_size);
 					instance_data->sampler_domain[0] = sampler_domain.position.x;
 					instance_data->sampler_domain[1] = sampler_domain.position.y;
 					instance_data->sampler_domain[2] = sampler_domain.size.x;
 					instance_data->sampler_domain[3] = sampler_domain.size.y;
-					instance_data->item_data |= rect->array_layer | (rect->max_region_lod << 11);
+					instance_data->item_data |= resolved.item_bits;
 					instance_data->reserved = 0;
 					instance_data->flags |= INSTANCE_FLAGS_USE_REGION_SAMPLING;
 					if (use_texture_array) {
