@@ -3662,6 +3662,7 @@ void TextureStorage::render_target_set_override(RID p_render_target, RID p_color
 		new_entry.fbo = rt->fbo;
 		new_entry.color = rt->color;
 		new_entry.depth = rt->depth;
+		new_entry.depth_has_stencil = rt->depth_has_stencil;
 		new_entry.size = rt->size;
 		// Keep track of any textures we had to allocate because they weren't overridden.
 		if (p_color_texture.is_null()) {
