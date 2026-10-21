@@ -55,6 +55,7 @@
 #include "servers/display/accessibility_server.h"
 #include "servers/rendering/dummy/rasterizer_dummy.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+#include "servers/rendering/rendering_server.h"
 
 #ifdef SDL_ENABLED
 #include "drivers/sdl/joypad_sdl.h"
@@ -4987,16 +4988,36 @@ void DisplayServerWindows::window_set_vsync_mode(DisplayServerEnums::VSyncMode p
 #endif
 
 #if defined(GLES3_ENABLED)
+	bool uses_gl = gl_manager_native != nullptr;
+#if defined(ANGLE_ENABLED)
+	uses_gl = uses_gl || gl_manager_angle != nullptr;
+#endif
+	if (uses_gl) {
+		// The OpenGL context is current only on the render thread, so with a separate render thread the swap interval
+		// is set there.
+		const bool use_vsync = p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED;
+		RenderingServer *rendering_server = RenderingServer::get_singleton();
+		if (rendering_server && !rendering_server->is_on_render_thread()) {
+			rendering_server->call_on_render_thread(callable_mp(this, &DisplayServerWindows::_gl_set_use_vsync).bind(p_window, use_vsync));
+		} else {
+			_gl_set_use_vsync(p_window, use_vsync);
+		}
+	}
+#endif
+}
+
+#if defined(GLES3_ENABLED)
+void DisplayServerWindows::_gl_set_use_vsync(DisplayServerEnums::WindowID p_window, bool p_use) {
 	if (gl_manager_native) {
-		gl_manager_native->set_use_vsync(p_window, p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED);
+		gl_manager_native->set_use_vsync(p_window, p_use);
 	}
 #if defined(ANGLE_ENABLED)
 	if (gl_manager_angle) {
-		gl_manager_angle->set_use_vsync(p_vsync_mode != DisplayServerEnums::VSYNC_DISABLED);
+		gl_manager_angle->set_use_vsync(p_use);
 	}
 #endif
-#endif
 }
+#endif
 
 DisplayServerEnums::VSyncMode DisplayServerWindows::window_get_vsync_mode(DisplayServerEnums::WindowID p_window) const {
 	_THREAD_SAFE_METHOD_

@@ -262,6 +262,7 @@ class DisplayServerWindows : public DisplayServer {
 	GLManagerANGLE_Windows *gl_manager_angle = nullptr;
 #endif
 	GLManagerNative_Windows *gl_manager_native = nullptr;
+	void _gl_set_use_vsync(DisplayServerEnums::WindowID p_window, bool p_use);
 #endif
 
 #if defined(RD_ENABLED)
