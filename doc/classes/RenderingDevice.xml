@@ -985,7 +985,7 @@
 			<return type="int" />
 			<param index="0" name="screen" type="int" default="0" />
 			<description>
-				Returns the window height matching the graphics API context for the given window ID (in pixels). Despite the parameter being named [param screen], this returns the [i]window[/i] size. See also [method screen_get_width].
+				Returns the window height matching the graphics API context for the given window ID (in pixels): the height of the window's swap chain images, which follows a resize of the window from the next frame drawn after it. Despite the parameter being named [param screen], this returns the [i]window[/i] size. See also [method screen_get_width].
 				[b]Note:[/b] Only the main [RenderingDevice] returned by [method RenderingServer.get_rendering_device] has a height. If called on a local [RenderingDevice], this method prints an error and returns [constant INVALID_ID].
 			</description>
 		</method>
@@ -993,7 +993,7 @@
 			<return type="int" />
 			<param index="0" name="screen" type="int" default="0" />
 			<description>
-				Returns the window width matching the graphics API context for the given window ID (in pixels). Despite the parameter being named [param screen], this returns the [i]window[/i] size. See also [method screen_get_height].
+				Returns the window width matching the graphics API context for the given window ID (in pixels): the width of the window's swap chain images, which follows a resize of the window from the next frame drawn after it. Despite the parameter being named [param screen], this returns the [i]window[/i] size. See also [method screen_get_height].
 				[b]Note:[/b] Only the main [RenderingDevice] returned by [method RenderingServer.get_rendering_device] has a width. If called on a local [RenderingDevice], this method prints an error and returns [constant INVALID_ID].
 			</description>
 		</method>

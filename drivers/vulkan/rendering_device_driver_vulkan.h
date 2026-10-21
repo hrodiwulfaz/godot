@@ -435,6 +435,7 @@ private:
 		LocalVector<CommandQueue *> command_queues_acquired;
 		LocalVector<uint32_t> command_queues_acquired_semaphores;
 		RenderPassID render_pass;
+		VkExtent2D extent = {};
 		int pre_transform_rotation_degrees = 0;
 		uint32_t image_index = 0;
 #ifdef ANDROID_ENABLED
@@ -451,6 +452,7 @@ public:
 	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override final;
 	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override final;
 	virtual int swap_chain_get_pre_rotation_degrees(SwapChainID p_swap_chain) override final;
+	virtual Size2i swap_chain_get_size(SwapChainID p_swap_chain) override final;
 	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override final;
 	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override final;
 	virtual bool swap_chain_get_hdr_output_supported(SwapChainID p_swap_chain) override final;

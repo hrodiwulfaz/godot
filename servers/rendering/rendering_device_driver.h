@@ -478,6 +478,10 @@ public:
 	// Retrieve the rotation in degrees to apply as a pre-transform. Usually 0 on PC. May be 0, 90, 180 & 270 on Android.
 	virtual int swap_chain_get_pre_rotation_degrees(SwapChainID p_swap_chain) { return 0; }
 
+	// Retrieve the size of the swap chain's framebuffers as of its last resize, or an empty size if the driver does not track it.
+	// The surface size can change on another thread at any time, so drawing to the swap chain must use this size instead.
+	virtual Size2i swap_chain_get_size(SwapChainID p_swap_chain) { return Size2i(); }
+
 	// Retrieve the format used by the swap chain's framebuffers.
 	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) = 0;
 

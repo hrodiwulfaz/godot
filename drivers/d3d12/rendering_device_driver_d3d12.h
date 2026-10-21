@@ -535,6 +535,8 @@ private:
 		TightLocalVector<ID3D12Resource *> render_targets;
 		TightLocalVector<TextureInfo> render_targets_info;
 		TightLocalVector<FramebufferID> framebuffers;
+		uint32_t width = 0;
+		uint32_t height = 0;
 		RDD::DataFormat data_format = DATA_FORMAT_MAX;
 		RDD::ColorSpace color_space = COLOR_SPACE_MAX;
 	};
@@ -549,6 +551,7 @@ public:
 	virtual Error swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) override;
 	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override;
 	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override;
+	virtual Size2i swap_chain_get_size(SwapChainID p_swap_chain) override;
 	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override;
 	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override;
 	virtual bool swap_chain_get_hdr_output_supported(SwapChainID p_swap_chain) override;

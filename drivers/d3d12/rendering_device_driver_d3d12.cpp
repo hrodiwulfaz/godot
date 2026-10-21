@@ -2691,6 +2691,8 @@ void RenderingDeviceDriverD3D12::_swap_chain_release_buffers(SwapChain *p_swap_c
 	}
 
 	p_swap_chain->framebuffers.clear();
+	p_swap_chain->width = 0;
+	p_swap_chain->height = 0;
 }
 
 RDD::RenderPassID RenderingDeviceDriverD3D12::_swap_chain_create_render_pass(RDD::DataFormat p_format) {
@@ -2741,7 +2743,10 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 	CommandQueueInfo *command_queue = (CommandQueueInfo *)(p_cmd_queue.id);
 	SwapChain *swap_chain = (SwapChain *)(p_swap_chain.id);
 	RenderingContextDriverD3D12::Surface *surface = (RenderingContextDriverD3D12::Surface *)(swap_chain->surface);
-	if (surface->width == 0 || surface->height == 0) {
+	// The window can be resized on another thread at any time, so the size is read once.
+	const uint32_t surface_width = surface->width;
+	const uint32_t surface_height = surface->height;
+	if (surface_width == 0 || surface_height == 0) {
 		// Very likely the window is minimized, don't create a swap chain.
 		return ERR_SKIP;
 	}
@@ -2795,7 +2800,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 	DXGI_SWAP_CHAIN_DESC1 swap_chain_desc = {};
 	if (swap_chain->d3d_swap_chain != nullptr) {
 		_swap_chain_release_buffers(swap_chain);
-		res = swap_chain->d3d_swap_chain->ResizeBuffers(p_desired_framebuffer_count, surface->width, surface->height, DXGI_FORMAT_UNKNOWN, creation_flags);
+		res = swap_chain->d3d_swap_chain->ResizeBuffers(p_desired_framebuffer_count, surface_width, surface_height, DXGI_FORMAT_UNKNOWN, creation_flags);
 		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_UNAVAILABLE);
 	} else {
 		DEV_ASSERT(swap_chain->render_pass.id == 0);
@@ -2816,8 +2821,8 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 			swap_chain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 			has_comp_alpha[(uint64_t)p_cmd_queue.id] = false;
 		}
-		swap_chain_desc.Width = surface->width;
-		swap_chain_desc.Height = surface->height;
+		swap_chain_desc.Width = surface_width;
+		swap_chain_desc.Height = surface_height;
 
 		ComPtr<IDXGISwapChain1> swap_chain_1;
 		if (create_for_composition) {
@@ -2933,6 +2938,9 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 		swap_chain->framebuffers.push_back(framebuffer);
 	}
 
+	swap_chain->width = swap_chain_desc.Width;
+	swap_chain->height = swap_chain_desc.Height;
+
 	// Once everything's been created correctly, indicate the surface no longer needs to be resized.
 	context_driver->surface_set_needs_resize(swap_chain->surface, false);
 
@@ -2956,6 +2964,11 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::swap_chain_acquire_framebuffer(Co
 RDD::RenderPassID RenderingDeviceDriverD3D12::swap_chain_get_render_pass(SwapChainID p_swap_chain) {
 	const SwapChain *swap_chain = (const SwapChain *)(p_swap_chain.id);
 	return swap_chain->render_pass;
+}
+
+Size2i RenderingDeviceDriverD3D12::swap_chain_get_size(SwapChainID p_swap_chain) {
+	const SwapChain *swap_chain = (const SwapChain *)(p_swap_chain.id);
+	return Size2i(swap_chain->width, swap_chain->height);
 }
 
 RDD::DataFormat RenderingDeviceDriverD3D12::swap_chain_get_format(SwapChainID p_swap_chain) {

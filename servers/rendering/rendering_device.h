@@ -1308,6 +1308,7 @@ private:
 	HashMap<DisplayServerEnums::WindowID, RDD::FramebufferID> screen_framebuffers;
 
 	uint32_t _get_swap_chain_desired_count() const;
+	Size2i _screen_get_size(DisplayServerEnums::WindowID p_screen) const;
 
 public:
 	Error screen_create(DisplayServerEnums::WindowID p_screen = DisplayServerEnums::MAIN_WINDOW_ID);

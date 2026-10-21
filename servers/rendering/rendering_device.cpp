@@ -5756,20 +5756,33 @@ Error RenderingDevice::screen_prepare_for_drawing(DisplayServerEnums::WindowID p
 	return OK;
 }
 
+Size2i RenderingDevice::_screen_get_size(DisplayServerEnums::WindowID p_screen) const {
+	RenderingContextDriver::SurfaceID surface = context->surface_get_from_window(p_screen);
+	ERR_FAIL_COND_V_MSG(surface == 0, Size2i(), "A surface was not created for the screen.");
+
+	// The display server can resize the surface on another thread at any time. Drawing must use the size of the swap
+	// chain's framebuffers instead, or it renders outside of them until the swap chain is resized.
+	HashMap<DisplayServerEnums::WindowID, RDD::SwapChainID>::ConstIterator it = screen_swap_chains.find(p_screen);
+	if (it != screen_swap_chains.end()) {
+		const Size2i size = driver->swap_chain_get_size(it->value);
+		if (size.width > 0 && size.height > 0) {
+			return size;
+		}
+	}
+
+	return Size2i(context->surface_get_width(surface), context->surface_get_height(surface));
+}
+
 int RenderingDevice::screen_get_width(DisplayServerEnums::WindowID p_screen) const {
 	_THREAD_SAFE_METHOD_
 
-	RenderingContextDriver::SurfaceID surface = context->surface_get_from_window(p_screen);
-	ERR_FAIL_COND_V_MSG(surface == 0, 0, "A surface was not created for the screen.");
-	return context->surface_get_width(surface);
+	return _screen_get_size(p_screen).width;
 }
 
 int RenderingDevice::screen_get_height(DisplayServerEnums::WindowID p_screen) const {
 	_THREAD_SAFE_METHOD_
 
-	RenderingContextDriver::SurfaceID surface = context->surface_get_from_window(p_screen);
-	ERR_FAIL_COND_V_MSG(surface == 0, 0, "A surface was not created for the screen.");
-	return context->surface_get_height(surface);
+	return _screen_get_size(p_screen).height;
 }
 
 int RenderingDevice::screen_get_pre_rotation_degrees(DisplayServerEnums::WindowID p_screen) const {
@@ -5855,7 +5868,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin_for_screen(DisplayS
 	ERR_FAIL_COND_V_MSG(sc_it == screen_swap_chains.end(), INVALID_ID, "Screen was never prepared.");
 	ERR_FAIL_COND_V_MSG(fb_it == screen_framebuffers.end(), INVALID_ID, "Framebuffer was never prepared.");
 
-	Rect2i viewport = Rect2i(0, 0, context->surface_get_width(surface), context->surface_get_height(surface));
+	Rect2i viewport = Rect2i(Point2i(), _screen_get_size(p_screen));
 
 	_draw_list_start(viewport);
 #ifdef DEBUG_ENABLED

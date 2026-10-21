@@ -3623,6 +3623,7 @@ void RenderingDeviceDriverVulkan::_swap_chain_release(SwapChain *swap_chain) {
 	}
 
 	swap_chain->image_index = UINT_MAX;
+	swap_chain->extent = {};
 	swap_chain->images.clear();
 	swap_chain->image_views.clear();
 	swap_chain->framebuffers.clear();
@@ -3951,8 +3952,10 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	fb_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 	fb_create_info.renderPass = vk_render_pass;
 	fb_create_info.attachmentCount = 1;
-	fb_create_info.width = surface->width;
-	fb_create_info.height = surface->height;
+	// The images have the swap chain's extent. The surface's size may already be another one: the window can be resized
+	// on another thread while the swap chain is created.
+	fb_create_info.width = extent.width;
+	fb_create_info.height = extent.height;
 	fb_create_info.layers = 1;
 
 	VkFramebuffer vk_framebuffer;
@@ -3978,6 +3981,8 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 
 		swap_chain->present_semaphores.push_back(vk_semaphore);
 	}
+
+	swap_chain->extent = extent;
 
 	// Once everything's been created correctly, indicate the surface no longer needs to be resized.
 	context_driver->surface_set_needs_resize(swap_chain->surface, false);
@@ -4055,6 +4060,13 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::swap_chain_get_render_pass(SwapCh
 
 	SwapChain *swap_chain = (SwapChain *)(p_swap_chain.id);
 	return swap_chain->render_pass;
+}
+
+Size2i RenderingDeviceDriverVulkan::swap_chain_get_size(SwapChainID p_swap_chain) {
+	DEV_ASSERT(p_swap_chain.id != 0);
+
+	const SwapChain *swap_chain = (const SwapChain *)(p_swap_chain.id);
+	return Size2i(swap_chain->extent.width, swap_chain->extent.height);
 }
 
 int RenderingDeviceDriverVulkan::swap_chain_get_pre_rotation_degrees(SwapChainID p_swap_chain) {
