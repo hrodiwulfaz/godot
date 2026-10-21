@@ -210,10 +210,59 @@ public:
 		return ret; \
 	}
 
+	// A queued texture command reads its images on the render thread later, while the caller may keep writing them
+	// (the text server writes new glyphs into its cache image after uploading it). Queued commands get a copy that
+	// shares the pixels until the caller writes again, so the render thread never reads an image being written.
+	static Ref<Image> _queued_image(const Ref<Image> &p_image) {
+		if (p_image.is_null()) {
+			return p_image;
+		}
+		Ref<Image> copy;
+		copy.instantiate();
+		copy->copy_internals_from(p_image);
+		return copy;
+	}
+
+	static Vector<Ref<Image>> _queued_images(const Vector<Ref<Image>> &p_images) {
+		Vector<Ref<Image>> copies;
+		copies.resize(p_images.size());
+		for (int i = 0; i < p_images.size(); i++) {
+			copies.write[i] = _queued_image(p_images[i]);
+		}
+		return copies;
+	}
+
 	//these go pass-through, as they can be called from any thread
-	FUNCRIDTEX1(texture_2d, const Ref<Image> &)
-	FUNCRIDTEX2(texture_2d_layered, const Vector<Ref<Image>> &, RSE::TextureLayeredType)
-	FUNCRIDTEX6(texture_3d, Image::Format, int, int, int, bool, const Vector<Ref<Image>> &)
+	virtual RID texture_2d_create(const Ref<Image> &p_image) override {
+		RID ret = RSG::texture_storage->texture_allocate();
+		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) {
+			RSG::texture_storage->texture_2d_initialize(ret, p_image);
+		} else {
+			command_queue.push(RSG::texture_storage, &RendererTextureStorage::texture_2d_initialize, ret, _queued_image(p_image));
+		}
+		return ret;
+	}
+
+	virtual RID texture_2d_layered_create(const Vector<Ref<Image>> &p_layers, RSE::TextureLayeredType p_layered_type) override {
+		RID ret = RSG::texture_storage->texture_allocate();
+		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) {
+			RSG::texture_storage->texture_2d_layered_initialize(ret, p_layers, p_layered_type);
+		} else {
+			command_queue.push(RSG::texture_storage, &RendererTextureStorage::texture_2d_layered_initialize, ret, _queued_images(p_layers), p_layered_type);
+		}
+		return ret;
+	}
+
+	virtual RID texture_3d_create(Image::Format p_format, int p_width, int p_height, int p_depth, bool p_mipmaps, const Vector<Ref<Image>> &p_data) override {
+		RID ret = RSG::texture_storage->texture_allocate();
+		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) {
+			RSG::texture_storage->texture_3d_initialize(ret, p_format, p_width, p_height, p_depth, p_mipmaps, p_data);
+		} else {
+			command_queue.push(RSG::texture_storage, &RendererTextureStorage::texture_3d_initialize, ret, p_format, p_width, p_height, p_depth, p_mipmaps, _queued_images(p_data));
+		}
+		return ret;
+	}
+
 	FUNCRIDTEX3(texture_external, int, int, uint64_t)
 	FUNCRIDTEX1(texture_proxy, RID)
 	virtual RID texture_drawable_create(int p_width, int p_height, RSE::TextureDrawableFormat p_format, const Color &p_color, bool p_with_mipmaps) override {
@@ -261,8 +310,25 @@ public:
 	}
 
 	//these go through command queue if they are in another thread
-	FUNC3(texture_2d_update, RID, const Ref<Image> &, int)
-	FUNC2(texture_3d_update, RID, const Vector<Ref<Image>> &)
+	virtual void texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer) override {
+		WRITE_ACTION
+		if (ASYNC_COND_PUSH) {
+			command_queue.push(RSG::texture_storage, &RendererTextureStorage::texture_2d_update, p_texture, _queued_image(p_image), p_layer);
+		} else {
+			command_queue.flush_if_pending();
+			RSG::texture_storage->texture_2d_update(p_texture, p_image, p_layer);
+		}
+	}
+
+	virtual void texture_3d_update(RID p_texture, const Vector<Ref<Image>> &p_data) override {
+		WRITE_ACTION
+		if (ASYNC_COND_PUSH) {
+			command_queue.push(RSG::texture_storage, &RendererTextureStorage::texture_3d_update, p_texture, _queued_images(p_data));
+		} else {
+			command_queue.flush_if_pending();
+			RSG::texture_storage->texture_3d_update(p_texture, p_data);
+		}
+	}
 	FUNC4(texture_external_update, RID, int, int, uint64_t)
 	FUNC2(texture_proxy_update, RID, RID)
 
